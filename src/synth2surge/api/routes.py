@@ -100,17 +100,26 @@ def _run_capture(job_id: str, req: CaptureRequest) -> None:
         _jobs[job_id]["status"] = "running"
 
         from synth2surge.capture.workflow import capture_from_state_file, capture_headless
+        from synth2surge.config import MultiProbeConfig
+
+        multi_probe_config = None
+        if req.probe_mode == "thorough":
+            multi_probe_config = MultiProbeConfig.thorough()
+        elif req.probe_mode == "full":
+            multi_probe_config = MultiProbeConfig.full()
 
         if req.state_file:
             result = capture_from_state_file(
                 plugin_path=req.plugin_path,
                 state_file=req.state_file,
                 output_dir=req.output_dir,
+                multi_probe_config=multi_probe_config,
             )
         else:
             result = capture_headless(
                 plugin_path=req.plugin_path,
                 output_dir=req.output_dir,
+                multi_probe_config=multi_probe_config,
             )
 
         _jobs[job_id]["status"] = "completed"
@@ -133,7 +142,7 @@ def _run_optimize(job_id: str, req: OptimizeRequest) -> None:
         import soundfile as sf
 
         from synth2surge.audio.engine import PluginHost
-        from synth2surge.config import OptimizationConfig
+        from synth2surge.config import MultiProbeConfig, OptimizationConfig
         from synth2surge.optimizer.loop import optimize
         from synth2surge.types import OptimizationProgress
 
@@ -147,6 +156,19 @@ def _run_optimize(job_id: str, req: OptimizeRequest) -> None:
             n_trials_tier2=req.trials_t2,
             n_trials_tier3=req.trials_t3,
         )
+
+        multi_probe_config = None
+        target_segments = None
+        if req.probe_mode == "thorough":
+            multi_probe_config = MultiProbeConfig.thorough()
+        elif req.probe_mode == "full":
+            multi_probe_config = MultiProbeConfig.full()
+
+        if multi_probe_config is not None and multi_probe_config.mode != "single":
+            segments_path = Path(req.output_dir) / "target_segments.npz"
+            if segments_path.exists():
+                data = np.load(str(segments_path))
+                target_segments = [data[k] for k in sorted(data.files)]
 
         def on_progress(p: OptimizationProgress) -> None:
             _jobs[job_id]["progress"] = {
@@ -164,6 +186,8 @@ def _run_optimize(job_id: str, req: OptimizeRequest) -> None:
             progress_callback=on_progress,
             stages=req.stages,
             output_dir=Path(req.output_dir),
+            multi_probe_config=multi_probe_config,
+            target_segments=target_segments,
         )
 
         _jobs[job_id]["status"] = "completed"

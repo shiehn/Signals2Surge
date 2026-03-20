@@ -6,6 +6,7 @@ import pytest
 from synth2surge.loss.mr_stft import (
     log_magnitude_distance,
     mr_stft_loss,
+    multi_probe_loss,
     spectral_convergence,
 )
 from tests.factories import make_noise, make_sine_wave
@@ -135,3 +136,48 @@ class TestMrStftLoss:
         loss_alpha5 = mr_stft_loss(target, candidate, alpha=5.0)
         # Higher alpha = more weight on log-magnitude = higher total loss
         assert loss_alpha0 < loss_alpha1 < loss_alpha5
+
+
+class TestMultiProbeLoss:
+    """Tests for the weighted multi-probe loss function."""
+
+    def test_multi_probe_identical_segments_zero(self):
+        seg1 = make_sine_wave(440.0, duration=1.0)
+        seg2 = make_sine_wave(880.0, duration=1.0)
+        loss = multi_probe_loss(
+            [seg1, seg2], [seg1, seg2], weights=[0.5, 0.5]
+        )
+        assert loss == pytest.approx(0.0, abs=1e-5)
+
+    def test_multi_probe_weights_affect_result(self):
+        target1 = make_sine_wave(440.0, duration=1.0)
+        target2 = make_sine_wave(880.0, duration=1.0)
+        cand1 = target1.copy()  # identical
+        cand2 = make_noise(duration=1.0)  # very different
+
+        # Equal weights
+        loss_equal = multi_probe_loss(
+            [target1, target2], [cand1, cand2], weights=[0.5, 0.5]
+        )
+        # Heavy weight on the mismatched segment
+        loss_heavy_mismatch = multi_probe_loss(
+            [target1, target2], [cand1, cand2], weights=[0.1, 0.9]
+        )
+        # Doubling weight on mismatch should increase loss
+        assert loss_heavy_mismatch > loss_equal
+
+    def test_multi_probe_single_segment_matches_mr_stft(self):
+        target = make_sine_wave(440.0, duration=1.0)
+        candidate = make_sine_wave(660.0, duration=1.0)
+        single_loss = mr_stft_loss(target, candidate)
+        multi_loss = multi_probe_loss([target], [candidate], weights=[1.0])
+        assert multi_loss == pytest.approx(single_loss, rel=1e-5)
+
+    def test_multi_probe_one_silent_segment_finite(self):
+        """Other segments prevent inf when one segment has silent target."""
+        silent = np.zeros(44100, dtype=np.float32)
+        sine = make_sine_wave(440.0, duration=1.0)
+        loss = multi_probe_loss(
+            [silent, sine], [sine, sine], weights=[0.5, 0.5]
+        )
+        assert np.isfinite(loss)

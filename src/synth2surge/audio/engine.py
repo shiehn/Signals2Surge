@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from synth2surge.audio.midi import create_probe, probe_duration
+from synth2surge.audio.midi import MultiProbeResult, create_probe, probe_duration
 from synth2surge.config import AudioConfig, MidiProbeConfig
 
 
@@ -149,6 +149,31 @@ class PluginHost:
             except (AttributeError, TypeError, ValueError):
                 pass
         return info
+
+    def render_multi_probe(
+        self,
+        multi_probe: MultiProbeResult,
+    ) -> tuple[np.ndarray, list[np.ndarray]]:
+        """Render a multi-probe MIDI sequence and slice into segments.
+
+        Args:
+            multi_probe: Composed multi-probe result with MIDI messages and segment info.
+
+        Returns:
+            Tuple of (full_mono_audio, [segment1_audio, segment2_audio, ...]).
+        """
+        full_audio = self.render_midi_mono(
+            midi_messages=multi_probe.midi_messages,
+            duration=multi_probe.total_duration,
+        )
+
+        segments = []
+        for seg in multi_probe.segments:
+            start = seg.start_sample
+            end = min(seg.end_sample, len(full_audio))
+            segments.append(full_audio[start:end])
+
+        return full_audio, segments
 
     def reset(self) -> None:
         """Reset plugin internal state (buffers, LFOs, etc.)."""

@@ -6,8 +6,9 @@ import numpy as np
 import pytest
 
 from synth2surge.audio.engine import PluginHost
+from synth2surge.audio.midi import compose_multi_probe
 from synth2surge.audio.renderer import render_and_save, render_patch
-from synth2surge.config import MidiProbeConfig
+from synth2surge.config import MidiProbeConfig, MultiProbeConfig
 
 SURGE_VST3 = Path("/Library/Audio/Plug-Ins/VST3/Surge XT.vst3")
 
@@ -99,3 +100,29 @@ class TestRenderer:
         assert out.exists()
         assert out.stat().st_size > 0
         assert result.audio.ndim == 1
+
+
+class TestMultiProbeRendering:
+    def test_render_multi_probe(self, surge_host: PluginHost):
+        """Render concatenated multi-probe, verify segments sliced correctly."""
+        config = MultiProbeConfig.thorough()
+        multi_probe = compose_multi_probe(config, sample_rate=surge_host.sample_rate)
+
+        surge_host.reset()
+        full_audio, segments = surge_host.render_multi_probe(multi_probe)
+
+        # Full audio should be 1-D
+        assert full_audio.ndim == 1
+        assert len(full_audio) > 0
+
+        # Should have same number of segments as probes
+        assert len(segments) == len(config.probes)
+
+        # Each segment should have audio data
+        for seg in segments:
+            assert len(seg) > 0
+            assert seg.dtype == np.float32
+
+        # Total samples in segments should not exceed full audio
+        total_seg_samples = sum(len(s) for s in segments)
+        assert total_seg_samples <= len(full_audio)

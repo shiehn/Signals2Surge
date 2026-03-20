@@ -16,6 +16,7 @@ class CaptureResult:
     state_path: Path
     parameters: dict[str, float]
     audio: np.ndarray | None = field(default=None, repr=False)
+    audio_segments: list[np.ndarray] | None = field(default=None, repr=False)
 
 
 @dataclass

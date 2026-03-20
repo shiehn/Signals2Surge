@@ -8,10 +8,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import soundfile as sf
 
 from synth2surge.audio.engine import PluginHost
-from synth2surge.config import AudioConfig, MidiProbeConfig
+from synth2surge.audio.midi import compose_multi_probe
+from synth2surge.config import AudioConfig, MidiProbeConfig, MultiProbeConfig
 from synth2surge.types import CaptureResult
 
 
@@ -21,6 +23,7 @@ def capture_headless(
     state_data: bytes | None = None,
     midi_config: MidiProbeConfig | None = None,
     sample_rate: int | None = None,
+    multi_probe_config: MultiProbeConfig | None = None,
 ) -> CaptureResult:
     """Capture a preset without GUI — uses current or provided state.
 
@@ -30,6 +33,7 @@ def capture_headless(
         state_data: Optional preset state bytes to load before rendering.
         midi_config: MIDI probe configuration.
         sample_rate: Audio sample rate.
+        multi_probe_config: Optional multi-probe config for thorough/full capture.
 
     Returns:
         CaptureResult with paths to saved files and audio data.
@@ -50,7 +54,21 @@ def capture_headless(
 
     # Render audio
     host.reset()
-    audio = host.render_midi_mono(midi_config=midi_config)
+    audio_segments: list[np.ndarray] | None = None
+
+    if multi_probe_config is not None and multi_probe_config.mode != "single":
+        multi_probe = compose_multi_probe(multi_probe_config, sample_rate=sr)
+        audio, audio_segments = host.render_multi_probe(multi_probe)
+
+        # Save segments as .npz
+        segments_path = output_dir / "target_segments.npz"
+        np.savez(
+            str(segments_path),
+            **{f"segment_{i}": seg for i, seg in enumerate(audio_segments)},
+        )
+    else:
+        audio = host.render_midi_mono(midi_config=midi_config)
+
     audio_path = output_dir / "target_audio.wav"
     sf.write(str(audio_path), audio, sr)
 
@@ -63,6 +81,7 @@ def capture_headless(
         state_path=state_path,
         parameters=float_params,
         audio=audio,
+        audio_segments=audio_segments,
     )
 
 
@@ -72,6 +91,7 @@ def capture_from_state_file(
     output_dir: str | Path,
     midi_config: MidiProbeConfig | None = None,
     sample_rate: int | None = None,
+    multi_probe_config: MultiProbeConfig | None = None,
 ) -> CaptureResult:
     """Capture a preset by loading a binary state file."""
     state_data = Path(state_file).read_bytes()
@@ -81,6 +101,7 @@ def capture_from_state_file(
         state_data=state_data,
         midi_config=midi_config,
         sample_rate=sample_rate,
+        multi_probe_config=multi_probe_config,
     )
 
 
@@ -89,6 +110,7 @@ def capture_with_gui(
     output_dir: str | Path,
     midi_config: MidiProbeConfig | None = None,
     sample_rate: int | None = None,
+    multi_probe_config: MultiProbeConfig | None = None,
 ) -> CaptureResult:
     """Capture a preset via the plugin's native GUI.
 
@@ -115,4 +137,5 @@ def capture_with_gui(
         state_data=host.get_state(),
         midi_config=midi_config,
         sample_rate=sr,
+        multi_probe_config=multi_probe_config,
     )

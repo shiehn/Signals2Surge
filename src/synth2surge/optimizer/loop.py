@@ -18,8 +18,9 @@ import optuna
 from optuna.samplers import CmaEsSampler
 
 from synth2surge.audio.engine import PluginHost
-from synth2surge.config import MidiProbeConfig, OptimizationConfig
-from synth2surge.loss.mr_stft import mr_stft_loss
+from synth2surge.audio.midi import compose_multi_probe
+from synth2surge.config import MidiProbeConfig, MultiProbeConfig, OptimizationConfig
+from synth2surge.loss.mr_stft import mr_stft_loss, multi_probe_loss
 from synth2surge.types import OptimizationProgress, OptimizationResult
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,8 @@ def optimize(
     stages: list[int] | None = None,
     scene: str = "a",
     output_dir: Path | None = None,
+    multi_probe_config: MultiProbeConfig | None = None,
+    target_segments: list[np.ndarray] | None = None,
 ) -> OptimizationResult:
     """Run multi-stage CMA-ES optimization to match target audio.
 
@@ -113,6 +116,8 @@ def optimize(
         stages: Which stages to run (default [1, 2, 3]).
         scene: Which scene to optimize ('a' or 'b').
         output_dir: Directory to save results (default: workspace/).
+        multi_probe_config: Optional multi-probe config for thorough/full mode.
+        target_segments: Pre-computed target audio segments (required for multi-probe).
 
     Returns:
         OptimizationResult with best patch path, loss, and metadata.
@@ -126,6 +131,22 @@ def optimize(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Determine if we're using multi-probe mode
+    use_multi_probe = (
+        multi_probe_config is not None
+        and multi_probe_config.mode != "single"
+        and target_segments is not None
+    )
+
+    # Build multi-probe result once if needed
+    multi_probe_result = None
+    segment_weights: list[float] = []
+    if use_multi_probe:
+        multi_probe_result = compose_multi_probe(
+            multi_probe_config, sample_rate=surge_host.sample_rate
+        )
+        segment_weights = [seg.weight for seg in multi_probe_result.segments]
+
     # Get parameter tiers
     param_tiers = get_optimizable_params(surge_host, scene=scene)
 
@@ -134,8 +155,6 @@ def optimize(
         2: config.n_trials_tier2,
         3: config.n_trials_tier3,
     }
-
-
 
     best_loss = float("inf")
     best_raw_values: dict[str, float] = {}
@@ -181,11 +200,15 @@ def optimize(
             surge_host.set_raw_values(all_values)
             surge_host.reset()
 
-            # Render
-            candidate_audio = surge_host.render_midi_mono(midi_config=midi_config)
-
-            # Compute loss
-            loss = mr_stft_loss(target_audio, candidate_audio)
+            # Render and compute loss
+            if use_multi_probe:
+                _, candidate_segments = surge_host.render_multi_probe(multi_probe_result)
+                loss = multi_probe_loss(
+                    target_segments, candidate_segments, segment_weights
+                )
+            else:
+                candidate_audio = surge_host.render_midi_mono(midi_config=midi_config)
+                loss = mr_stft_loss(target_audio, candidate_audio)
 
             # Handle inf/nan
             if not np.isfinite(loss):

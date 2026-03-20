@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 
 from synth2surge.audio.engine import PluginHost
-from synth2surge.config import MidiProbeConfig, OptimizationConfig
+from synth2surge.audio.midi import compose_multi_probe
+from synth2surge.config import MidiProbeConfig, MultiProbeConfig, OptimizationConfig
 from synth2surge.optimizer.loop import get_optimizable_params, optimize
 
 SURGE_VST3 = Path("/Library/Audio/Plug-Ins/VST3/Surge XT.vst3")
@@ -109,3 +110,45 @@ class TestOptimize:
         assert result.best_patch_path.stat().st_size > 0
         assert result.best_audio_path.exists()
         assert result.best_audio_path.stat().st_size > 0
+
+    def test_multi_probe_optimization_reduces_loss(
+        self, surge_host: PluginHost, tmp_path: Path
+    ):
+        """Short multi-probe optimization produces valid result."""
+        multi_probe_config = MultiProbeConfig.thorough()
+        multi_probe = compose_multi_probe(
+            multi_probe_config, sample_rate=surge_host.sample_rate
+        )
+
+        # Render target segments
+        surge_host.reset()
+        _, target_segments = surge_host.render_multi_probe(multi_probe)
+
+        # Also render single target for the function signature
+        surge_host.reset()
+        target_audio = surge_host.render_midi_mono()
+
+        # Perturb
+        raw = surge_host.get_raw_values()
+        perturbed = {k: min(1.0, max(0.0, v + 0.05)) for k, v in raw.items()}
+        surge_host.set_raw_values(perturbed)
+
+        config = OptimizationConfig(
+            n_trials_tier1=10,
+            n_trials_tier2=0,
+            n_trials_tier3=0,
+        )
+
+        result = optimize(
+            target_audio=target_audio,
+            surge_host=surge_host,
+            config=config,
+            stages=[1],
+            output_dir=tmp_path,
+            multi_probe_config=multi_probe_config,
+            target_segments=target_segments,
+        )
+
+        assert result.best_loss < float("inf")
+        assert result.total_trials == 10
+        assert result.best_patch_path.exists()

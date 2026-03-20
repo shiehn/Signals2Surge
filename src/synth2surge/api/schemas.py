@@ -10,6 +10,7 @@ class CaptureRequest(BaseModel):
     output_dir: str = "./workspace"
     no_gui: bool = True
     state_file: str | None = None
+    probe_mode: str = "single"
 
 
 class OptimizeRequest(BaseModel):
@@ -20,6 +21,7 @@ class OptimizeRequest(BaseModel):
     trials_t2: int = 300
     trials_t3: int = 200
     stages: list[int] = [1, 2, 3]
+    probe_mode: str = "single"
 
 
 class JobStatus(BaseModel):

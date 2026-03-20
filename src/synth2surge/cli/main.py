@@ -26,6 +26,9 @@ def capture(
     duration: float = typer.Option(4.0, help="Render duration in seconds"),
     note: int = typer.Option(60, help="MIDI note (60 = C4)"),
     velocity: int = typer.Option(100, help="MIDI velocity"),
+    probe_mode: str = typer.Option(
+        "single", help="Probe mode: single, thorough, or full"
+    ),
 ) -> None:
     """Capture a preset from a source synth plugin."""
     from synth2surge.capture.workflow import (
@@ -33,7 +36,7 @@ def capture(
         capture_headless,
         capture_with_gui,
     )
-    from synth2surge.config import MidiProbeConfig
+    from synth2surge.config import MidiProbeConfig, MultiProbeConfig
 
     midi_config = MidiProbeConfig(
         note=note,
@@ -42,7 +45,14 @@ def capture(
         release_seconds=1.0,
     )
 
+    multi_probe_config = None
+    if probe_mode == "thorough":
+        multi_probe_config = MultiProbeConfig.thorough()
+    elif probe_mode == "full":
+        multi_probe_config = MultiProbeConfig.full()
+
     console.print(f"[bold]Loading plugin:[/bold] {plugin}")
+    console.print(f"[bold]Probe mode:[/bold] {probe_mode}")
 
     if state_file is not None:
         console.print(f"[bold]Loading state from:[/bold] {state_file}")
@@ -51,12 +61,14 @@ def capture(
             state_file=state_file,
             output_dir=output_dir,
             midi_config=midi_config,
+            multi_probe_config=multi_probe_config,
         )
     elif no_gui:
         result = capture_headless(
             plugin_path=plugin,
             output_dir=output_dir,
             midi_config=midi_config,
+            multi_probe_config=multi_probe_config,
         )
     else:
         console.print(
@@ -66,11 +78,14 @@ def capture(
             plugin_path=plugin,
             output_dir=output_dir,
             midi_config=midi_config,
+            multi_probe_config=multi_probe_config,
         )
 
     console.print(f"[green]Audio saved:[/green] {result.audio_path}")
     console.print(f"[green]State saved:[/green] {result.state_path}")
     console.print(f"[green]Parameters captured:[/green] {len(result.parameters)}")
+    if result.audio_segments is not None:
+        console.print(f"[green]Audio segments:[/green] {len(result.audio_segments)}")
 
 
 @app.command()
@@ -85,19 +100,23 @@ def optimize(
     trials_t2: int = typer.Option(300, help="Trials for tier 2 (shaping params)"),
     trials_t3: int = typer.Option(200, help="Trials for tier 3 (detail params)"),
     stages: str = typer.Option("1,2,3", help="Optimization stages to run (comma-separated)"),
+    probe_mode: str = typer.Option(
+        "single", help="Probe mode: single, thorough, or full"
+    ),
 ) -> None:
     """Optimize a Surge XT patch to match target audio."""
     import numpy as np
     import soundfile as sf
 
     from synth2surge.audio.engine import PluginHost
-    from synth2surge.config import OptimizationConfig
+    from synth2surge.config import MultiProbeConfig, OptimizationConfig
     from synth2surge.optimizer.loop import optimize as run_optimize
     from synth2surge.types import OptimizationProgress
 
     stage_list = [int(s.strip()) for s in stages.split(",")]
 
     console.print(f"[bold]Target audio:[/bold] {target}")
+    console.print(f"[bold]Probe mode:[/bold] {probe_mode}")
     console.print(f"[bold]Stages:[/bold] {stage_list}")
     console.print(f"[bold]Trials:[/bold] T1={trials_t1}, T2={trials_t2}, T3={trials_t3}")
 
@@ -113,6 +132,28 @@ def optimize(
         n_trials_tier2=trials_t2,
         n_trials_tier3=trials_t3,
     )
+
+    # Set up multi-probe if requested
+    multi_probe_config = None
+    target_segments = None
+    if probe_mode == "thorough":
+        multi_probe_config = MultiProbeConfig.thorough()
+    elif probe_mode == "full":
+        multi_probe_config = MultiProbeConfig.full()
+
+    if multi_probe_config is not None and multi_probe_config.mode != "single":
+        # Check for pre-computed segments
+        segments_path = Path(output_dir) / "target_segments.npz"
+        if segments_path.exists():
+            console.print(f"[bold]Loading target segments from:[/bold] {segments_path}")
+            data = np.load(str(segments_path))
+            target_segments = [data[k] for k in sorted(data.files)]
+        else:
+            console.print(
+                "[red]Target segments not found. Run 'capture' with "
+                f"--probe-mode {probe_mode} first.[/red]"
+            )
+            raise typer.Exit(1)
 
     total_trials = sum(
         [trials_t1, trials_t2, trials_t3][s - 1] for s in stage_list
@@ -144,6 +185,8 @@ def optimize(
             progress_callback=on_progress,
             stages=stage_list,
             output_dir=output_dir,
+            multi_probe_config=multi_probe_config,
+            target_segments=target_segments,
         )
 
     console.print("\n[green bold]Optimization complete![/green bold]")

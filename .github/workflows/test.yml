@@ -21,11 +21,8 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Install dependencies
-        run: uv pip install --system -e ".[dev]"
-
       - name: Run ruff
-        run: ruff check src/ tests/
+        run: uv run ruff check src/ tests/
 
   unit:
     name: Unit Tests
@@ -41,12 +38,9 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Install dependencies
-        run: uv pip install --system -e ".[dev]"
-
       - name: Run unit tests with coverage
         run: >
-          pytest tests/unit/
+          uv run pytest tests/unit/
           -v
           --tb=short
           --cov=synth2surge
@@ -70,12 +64,9 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Install dependencies
-        run: uv pip install --system -e ".[dev]"
-
       - name: Run all tests (integration tests skip if Surge XT not installed)
         run: >
-          pytest tests/
+          uv run pytest tests/
           -v
           --tb=short
           -m "not slow"

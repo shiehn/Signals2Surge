@@ -2,10 +2,208 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings
+
+
+class ProbeType(Enum):
+    """Type of MIDI probe for multi-probe system."""
+
+    SUSTAINED = "sustained"
+    VELOCITY = "velocity"
+    STACCATO = "staccato"
+    CHORD = "chord"
+    SEQUENCE = "sequence"
+    BASS_LINE = "bass_line"
+    MELODY = "melody"
+    CHORD_PROGRESSION = "chord_progression"
+    COMPING = "comping"
+    PERCUSSIVE = "percussive"
+    LEGATO = "legato"
+    INTERVAL_JUMP = "interval_jump"
+    SUB_BASS = "sub_bass"
+
+
+@dataclass
+class ProbeDefinition:
+    """Definition of a single probe within a multi-probe configuration."""
+
+    probe_type: ProbeType
+    notes: list[int]
+    velocities: list[int]
+    sustain_seconds: float
+    release_seconds: float
+    weight: float
+    gap_seconds: float = 0.3
+
+
+@dataclass
+class MultiProbeConfig:
+    """Configuration for multi-probe MIDI rendering."""
+
+    mode: Literal["single", "thorough", "full"]
+    probes: list[ProbeDefinition] = field(default_factory=list)
+
+    @classmethod
+    def single(cls) -> MultiProbeConfig:
+        """Legacy single-probe mode: one C4 note, velocity 100, 3s sustain + 1s release."""
+        return cls(
+            mode="single",
+            probes=[
+                ProbeDefinition(
+                    probe_type=ProbeType.SUSTAINED,
+                    notes=[60],
+                    velocities=[100],
+                    sustain_seconds=3.0,
+                    release_seconds=1.0,
+                    weight=1.0,
+                    gap_seconds=0.0,
+                ),
+            ],
+        )
+
+    @classmethod
+    def thorough(cls) -> MultiProbeConfig:
+        """6 synth-response probes testing pitch, velocity, articulation, and polyphony."""
+        return cls(
+            mode="thorough",
+            probes=[
+                ProbeDefinition(
+                    probe_type=ProbeType.SUSTAINED,
+                    notes=[36],
+                    velocities=[100],
+                    sustain_seconds=2.0,
+                    release_seconds=0.8,
+                    weight=0.20,
+                ),
+                ProbeDefinition(
+                    probe_type=ProbeType.SUSTAINED,
+                    notes=[60],
+                    velocities=[100],
+                    sustain_seconds=2.0,
+                    release_seconds=0.8,
+                    weight=0.30,
+                ),
+                ProbeDefinition(
+                    probe_type=ProbeType.SUSTAINED,
+                    notes=[84],
+                    velocities=[100],
+                    sustain_seconds=1.5,
+                    release_seconds=0.5,
+                    weight=0.15,
+                ),
+                ProbeDefinition(
+                    probe_type=ProbeType.VELOCITY,
+                    notes=[60],
+                    velocities=[30, 80, 127],
+                    sustain_seconds=1.5,
+                    release_seconds=0.5,
+                    weight=0.15,
+                ),
+                ProbeDefinition(
+                    probe_type=ProbeType.STACCATO,
+                    notes=[60],
+                    velocities=[100],
+                    sustain_seconds=0.1,
+                    release_seconds=0.3,
+                    weight=0.10,
+                ),
+                ProbeDefinition(
+                    probe_type=ProbeType.CHORD,
+                    notes=[60, 64, 67],
+                    velocities=[90],
+                    sustain_seconds=1.5,
+                    release_seconds=0.8,
+                    weight=0.10,
+                ),
+            ],
+        )
+
+    @classmethod
+    def full(cls) -> MultiProbeConfig:
+        """14 probes: 6 synth-response + 8 musical context probes."""
+        thorough = cls.thorough()
+        # Re-weight thorough probes to sum to 0.60
+        thorough_total = sum(p.weight for p in thorough.probes)
+        for p in thorough.probes:
+            p.weight = p.weight / thorough_total * 0.60
+
+        musical_probes = [
+            ProbeDefinition(
+                probe_type=ProbeType.SUB_BASS,
+                notes=[24],
+                velocities=[100],
+                sustain_seconds=3.0,
+                release_seconds=1.0,
+                weight=0.06,
+            ),
+            ProbeDefinition(
+                probe_type=ProbeType.BASS_LINE,
+                notes=[28, 31, 33, 35],
+                velocities=[90],
+                sustain_seconds=0.4,
+                release_seconds=0.0,
+                weight=0.06,
+            ),
+            ProbeDefinition(
+                probe_type=ProbeType.MELODY,
+                notes=[60, 62, 64, 65, 67, 69, 71, 72],
+                velocities=[80],
+                sustain_seconds=0.2,
+                release_seconds=0.0,
+                weight=0.06,
+            ),
+            ProbeDefinition(
+                probe_type=ProbeType.CHORD_PROGRESSION,
+                notes=[60, 64, 67, 65, 69, 72, 67, 71, 74, 60, 64, 67],
+                velocities=[85],
+                sustain_seconds=1.0,
+                release_seconds=0.3,
+                weight=0.06,
+            ),
+            ProbeDefinition(
+                probe_type=ProbeType.COMPING,
+                notes=[60, 64, 67],
+                velocities=[70],
+                sustain_seconds=0.1,
+                release_seconds=0.3,
+                weight=0.04,
+            ),
+            ProbeDefinition(
+                probe_type=ProbeType.PERCUSSIVE,
+                notes=[60],
+                velocities=[127],
+                sustain_seconds=0.05,
+                release_seconds=1.0,
+                weight=0.04,
+            ),
+            ProbeDefinition(
+                probe_type=ProbeType.LEGATO,
+                notes=[60, 62, 64, 65, 67],
+                velocities=[80],
+                sustain_seconds=0.4,
+                release_seconds=0.1,
+                weight=0.04,
+            ),
+            ProbeDefinition(
+                probe_type=ProbeType.INTERVAL_JUMP,
+                notes=[36, 60, 84, 60],
+                velocities=[100],
+                sustain_seconds=0.8,
+                release_seconds=0.2,
+                weight=0.04,
+            ),
+        ]
+
+        return cls(
+            mode="full",
+            probes=thorough.probes + musical_probes,
+        )
 
 
 class AudioConfig(BaseSettings):
