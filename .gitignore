@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project
+workspace/
+*.wav
+*.bin
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+
+# FAISS indexes (large binary files)
+*.faiss
+prior_index/

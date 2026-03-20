@@ -1,0 +1,207 @@
+"""Surge XT XML patch parser, writer, and mutator.
+
+Handles both raw XML and .fxp files (which have a binary header before XML).
+The FXP format: 92 bytes binary header (CcnK/FPCh chunk) followed by XML.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from lxml import etree
+
+from synth2surge.types import PatchMetadata
+
+# FXP binary header: magic "CcnK" at offset 0
+FXP_MAGIC = b"CcnK"
+FXP_HEADER_MIN_SIZE = 60  # Minimum header before XML could start
+
+# Surge parameter type codes
+PARAM_TYPE_INT = "0"
+PARAM_TYPE_BOOL = "1"
+PARAM_TYPE_FLOAT = "2"
+
+
+class SurgePatch:
+    """Parse, mutate, and serialize Surge XT XML patches."""
+
+    def __init__(self, tree: etree._ElementTree) -> None:
+        self._tree = tree
+        self._root = tree.getroot()
+
+    @classmethod
+    def from_file(cls, path: str | Path) -> SurgePatch:
+        """Load a Surge XT patch from .fxp or raw XML file."""
+        path = Path(path)
+        data = path.read_bytes()
+
+        if data[:4] == FXP_MAGIC:
+            xml_bytes = _strip_fxp_header(data)
+        else:
+            xml_bytes = data
+
+        return cls._from_xml_bytes(xml_bytes)
+
+    @classmethod
+    def from_xml_string(cls, xml: str) -> SurgePatch:
+        """Parse a Surge XT patch from an XML string."""
+        return cls._from_xml_bytes(xml.encode("utf-8"))
+
+    @classmethod
+    def _from_xml_bytes(cls, xml_bytes: bytes) -> SurgePatch:
+        parser = etree.XMLParser(recover=True)
+        tree = etree.ElementTree(etree.fromstring(xml_bytes, parser=parser))
+        return cls(tree)
+
+    @property
+    def metadata(self) -> PatchMetadata:
+        """Extract patch metadata."""
+        meta = self._root.find(".//meta")
+        if meta is None:
+            return PatchMetadata()
+        return PatchMetadata(
+            name=meta.get("name", ""),
+            category=meta.get("category", ""),
+            author=meta.get("author", ""),
+            comment=meta.get("comment", ""),
+        )
+
+    @property
+    def revision(self) -> int:
+        """Patch format revision number."""
+        return int(self._root.get("revision", "0"))
+
+    def get_parameter(self, name: str) -> float | int | None:
+        """Get a single parameter value by element name."""
+        elem = self._root.find(f".//parameters/{name}")
+        if elem is None:
+            return None
+        return _parse_param_value(elem)
+
+    def set_parameter(self, name: str, value: float | int) -> None:
+        """Set a single parameter value by element name."""
+        elem = self._root.find(f".//parameters/{name}")
+        if elem is None:
+            raise KeyError(f"Parameter not found: {name}")
+        elem.set("value", _format_value(value, elem.get("type", PARAM_TYPE_FLOAT)))
+
+    def get_all_parameters(self) -> dict[str, float | int]:
+        """Extract all typed parameters as a flat dictionary."""
+        params = {}
+        parameters_elem = self._root.find(".//parameters")
+        if parameters_elem is None:
+            return params
+        for elem in parameters_elem:
+            if elem.get("type") is not None and elem.get("value") is not None:
+                params[elem.tag] = _parse_param_value(elem)
+        return params
+
+    def set_all_parameters(self, params: dict[str, float | int]) -> None:
+        """Set multiple parameter values at once."""
+        for name, value in params.items():
+            self.set_parameter(name, value)
+
+    def get_parameter_types(self) -> dict[str, str]:
+        """Get the type code for each parameter."""
+        types = {}
+        parameters_elem = self._root.find(".//parameters")
+        if parameters_elem is None:
+            return types
+        for elem in parameters_elem:
+            ptype = elem.get("type")
+            if ptype is not None:
+                types[elem.tag] = ptype
+        return types
+
+    def to_xml_string(self) -> str:
+        """Serialize the patch back to XML."""
+        return etree.tostring(
+            self._root,
+            xml_declaration=True,
+            encoding="UTF-8",
+            standalone=True,
+        ).decode("utf-8")
+
+    def to_xml_bytes(self) -> bytes:
+        """Serialize the patch to XML bytes."""
+        return etree.tostring(
+            self._root,
+            xml_declaration=True,
+            encoding="UTF-8",
+            standalone=True,
+        )
+
+    def to_file(self, path: str | Path) -> None:
+        """Write the patch as raw XML to a file."""
+        path = Path(path)
+        path.write_bytes(self.to_xml_bytes())
+
+    def clone(self) -> SurgePatch:
+        """Create a deep copy of this patch."""
+        import copy
+
+        new_tree = copy.deepcopy(self._tree)
+        return SurgePatch(new_tree)
+
+    def parameter_names(self) -> list[str]:
+        """List all parameter element names."""
+        parameters_elem = self._root.find(".//parameters")
+        if parameters_elem is None:
+            return []
+        return [
+            elem.tag
+            for elem in parameters_elem
+            if elem.get("type") is not None
+        ]
+
+    def float_parameter_names(self) -> list[str]:
+        """List names of all float (type=2) parameters."""
+        parameters_elem = self._root.find(".//parameters")
+        if parameters_elem is None:
+            return []
+        return [
+            elem.tag
+            for elem in parameters_elem
+            if elem.get("type") == PARAM_TYPE_FLOAT
+        ]
+
+    def int_parameter_names(self) -> list[str]:
+        """List names of all int (type=0) parameters."""
+        parameters_elem = self._root.find(".//parameters")
+        if parameters_elem is None:
+            return []
+        return [
+            elem.tag
+            for elem in parameters_elem
+            if elem.get("type") == PARAM_TYPE_INT
+        ]
+
+
+def _strip_fxp_header(data: bytes) -> bytes:
+    """Strip the FXP binary header and return the XML portion."""
+    # FXP format: CcnK magic, then various chunks. The XML starts at the first '<'
+    xml_start = data.find(b"<?xml")
+    if xml_start < 0:
+        # Try finding just '<patch'
+        xml_start = data.find(b"<patch")
+    if xml_start < 0:
+        raise ValueError("No XML content found in FXP file")
+    return data[xml_start:]
+
+
+def _parse_param_value(elem: etree._Element) -> float | int:
+    """Parse a parameter element's value based on its type."""
+    ptype = elem.get("type", PARAM_TYPE_FLOAT)
+    raw = elem.get("value", "0")
+    if ptype == PARAM_TYPE_FLOAT:
+        return float(raw)
+    else:
+        return int(float(raw))  # int() via float() handles "1.00000" strings
+
+
+def _format_value(value: float | int, ptype: str) -> str:
+    """Format a value for writing back to XML."""
+    if ptype == PARAM_TYPE_FLOAT:
+        return f"{float(value):.14f}"
+    else:
+        return str(int(value))

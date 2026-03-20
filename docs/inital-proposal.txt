@@ -1,0 +1,90 @@
+# Architecture Blueprint: Synth2Surge (Arbitrary VST to Surge XT Translator)
+
+## 1. Executive Summary
+Synth2Surge is a bifurcated system designed to translate any arbitrary synth patch (e.g., Serum, Vital) into a perceptually similar Surge XT patch via black-box optimization. It abandons DAW automation in favor of a persistent, hybrid C++ audio worker (Tracktion/JUCE) controlled by a Python orchestrator. The system relies on Multi-Resolution STFT (MR-STFT) loss and CMA-ES optimization to iteratively mutate a Surge XT XML patch until its audio output matches the target.
+
+**Core Constraints:**
+* **Target OS:** MacOS (Apple Silicon native).
+* **Runtime:** Offline, non-real-time. Slow, highly iterative optimization loops.
+* **Execution Strategy:** Designed for autonomous implementation via an AI coding assistant.
+
+---
+
+## 2. System Architecture
+
+The system is split into two isolated processes communicating over local IPC (ZeroMQ or Local HTTP).
+
+### Component A: The Muscle (C++ / JUCE / Tracktion Engine)
+A dual-mode C++ application responsible for plugin hosting and deterministic audio rendering.
+* **Frameworks:** JUCE 8, Tracktion Engine.
+* **Audio Driver:** JUCE's `AudioIODeviceType::createAudioIODeviceType_CoreAudio()` (or purely offline `AudioFormatWriter`).
+* **Mode 1 (Capture GUI):** A lightweight window that hosts a target VST3's native UI, allowing the user to manually select a preset. It extracts the binary state chunk and renders the target audio.
+* **Mode 2 (Headless Daemon):** A persistent background process that holds Surge XT in memory. It listens for incoming XML patch updates from Python, renders them offline, and returns the `.wav` paths, eliminating plugin load-time overhead during optimization.
+
+### Component B: The Brain (Python 3.11+)
+The orchestration, dataset generation, feature extraction, and optimization layer.
+* **Backend Interface:** FastAPI (provides a CLI/API to initiate capture and monitor translation progress).
+* **DSP & Feature Extraction:** Librosa, PyTorch.
+* **Optimization:** Optuna (CMA-ES sampler).
+* **Search & Retrieval:** FAISS (for nearest-neighbor initialization).
+
+---
+
+## 3. The Objective Function (MR-STFT Loss)
+
+To avoid the pitfalls of phase mismatch inherent in raw waveform or simple spectrogram comparisons, the loss function uses Multi-Resolution Short-Time Fourier Transform (MR-STFT).
+
+The optimizer will minimize the distance between the target audio $x$ and candidate audio $\hat{x}$. For $M$ different FFT sizes, the loss is:
+
+$$L_{MR-STFT}(x, \hat{x}) = \frac{1}{M} \sum_{m=1}^{M} \left( L_{sc}^{(m)}(x, \hat{x}) + \alpha L_{mag}^{(m)}(x, \hat{x}) \right)$$
+
+Where Spectral Convergence $L_{sc}$ focuses on large spectral peaks:
+$$L_{sc}(x, \hat{x}) = \frac{\| \|STFT(x)\| - \|STFT(\hat{x})\| \|_F}{\| \|STFT(x)\| \|_F}$$
+
+And Log-Magnitude Distance $L_{mag}$ captures quieter details and noise floors:
+$$L_{mag}(x, \hat{x}) = \frac{1}{N} \| \log \|STFT(x)\| - \log \|STFT(\hat{x})\| \|_1$$
+
+*Implementation Note:* Librosa will be used to compute the STFTs efficiently utilizing 3 FFT sizes (e.g., 2048, 1024, 512).
+
+---
+
+## 4. Execution Plan (Instructions for Implementation)
+
+### Phase 1: The Capture Phase (Target Synth Loading)
+Because modern VST3/AU plugins manage their own preset files internally, the host cannot reliably automate preset selection. This phase requires a minimal GUI.
+1. **Initialize `capture_app.cpp`:** Build a JUCE application with a `DocumentWindow`.
+2. **Plugin Hosting:** Use `AudioPluginFormatManager` to load the target VST3/AU specified via CLI arguments.
+3. **Editor UI:** Embed the plugin's native UI using `createEditorIfNeeded()`. Add a "Capture & Render" button to the window header.
+4. **State Extraction:** On button click, call `juce::AudioPluginInstance::getStateInformation()` to grab the raw binary chunk of the current patch. Save this to `./workspace/target_state.bin`.
+5. **Immediate Render:** Use the Tracktion Engine to run a fixed MIDI probe (e.g., a 2-second C4 note with varying velocities) through the loaded instance. Export to `./workspace/target_audio.wav`.
+6. **Exit:** Terminate the GUI gracefully and hand control back to Python.
+
+### Phase 2: The Headless C++ Daemon
+1. **Initialize `daemon.cpp`:** Create a headless JUCE/Tracktion instance.
+2. **IPC Server:** Implement a local HTTP server listening on `localhost:8080`.
+3. **Persistent State:** Load an instance of Surge XT and keep it alive in memory.
+4. **The `/render` Endpoint:** * Accept a path to a Surge XML file.
+   * Call `setStateInformation()` to update the live Surge instance.
+   * Render the fixed MIDI probe offline using `tracktion_engine::Renderer::renderToFile`.
+   * Return the path of the generated candidate `.wav`.
+
+### Phase 3: The Python Brain & Feature Extraction
+1. **Environment:** Set up Python with `fastapi`, `uvicorn`, `librosa`, `numpy`, `optuna`, `faiss-cpu`.
+2. **Extractor (`extractor.py`):** Implement the MR-STFT loss function utilizing Librosa.
+3. **Communicator (`communicator.py`):** Write the HTTP client that posts XML to the C++ daemon's `/render` endpoint.
+
+### Phase 4: Dataset Generation (The Prior)
+1. **Generator (`generate_prior.py`):** Read the default Surge XT factory XML patches.
+2. **Mutation:** Apply Gaussian noise to continuous XML parameters (e.g., filter cutoff) and randomly flip discrete parameters to generate 10,000 variations.
+3. **Indexing:** Route these variations through the C++ daemon, extract their MR-STFT features, flatten them, and store them in a FAISS index to build a retrieval-first initialization map.
+
+### Phase 5: The Optimization Loop (The Core)
+1. **Initializer:** When `target_audio.wav` is captured (from Phase 1), extract its features and query the FAISS index to retrieve the top 3 closest Surge XT XML seeds.
+2. **Optimizer (`optimizer.py`):** Using Optuna (`CmaEsSampler`), map the continuous numeric values in the chosen Surge XML seeds to `suggest_float` distributions.
+3. **The Loop:**
+   * Optuna suggests new parameters.
+   * Python modifies the Surge XML and saves to `./workspace/candidate.xml`.
+   * Python calls the C++ daemon to render it.
+   * Python calculates the MR-STFT loss against `target_audio.wav`.
+   * Loss is returned to Optuna.
+4. **Convergence:** Run for $N$ trials (e.g., 500-1000). Save the XML of the trial with the lowest loss as the final translated patch. Expose progress via a FastAPI polling endpoint.
