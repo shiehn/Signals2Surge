@@ -246,9 +246,9 @@ class SurgeConfig(BaseSettings):
 class OptimizationConfig(BaseSettings):
     """Optimization loop configuration."""
 
-    n_trials_tier1: int = 300
-    n_trials_tier2: int = 300
-    n_trials_tier3: int = 200
+    n_trials_tier1: int = 50
+    n_trials_tier2: int = 30
+    n_trials_tier3: int = 20
     n_seeds: int = 3
     storage_path: Path = Path("workspace/optuna.db")
 

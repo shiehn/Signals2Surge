@@ -175,10 +175,14 @@ def train_predictor(
         else:
             epochs_without_improvement += 1
 
-        if epoch % 20 == 0:
+        # Log every 5 epochs (or every epoch for small runs)
+        log_interval = 5 if max_epochs > 20 else 1
+        if epoch % log_interval == 0 or epoch == max_epochs - 1:
+            marker = " *" if val_loss <= best_val_loss else ""
             logger.info(
-                f"Epoch {epoch}: train={avg_train_loss:.6f} val={val_loss:.6f} "
-                f"best_val={best_val_loss:.6f}"
+                f"Epoch {epoch:>4d}/{max_epochs}  "
+                f"train={avg_train_loss:.6f}  val={val_loss:.6f}  "
+                f"best={best_val_loss:.6f}{marker}"
             )
 
         if epochs_without_improvement >= patience:

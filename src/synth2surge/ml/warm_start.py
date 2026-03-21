@@ -78,6 +78,13 @@ class WarmStarter:
                 checkpoint_dir = pretrained
                 logger.info("Using downloaded pretrained model")
 
+        # Try 3: scan models_dir for any predictor_*/model.pt
+        if checkpoint_dir is None and self._models_dir.exists():
+            candidates = sorted(self._models_dir.glob("predictor_*/model.pt"))
+            if candidates:
+                checkpoint_dir = candidates[-1].parent
+                logger.info(f"Using discovered model {checkpoint_dir.name}")
+
         if checkpoint_dir is None:
             return False
 

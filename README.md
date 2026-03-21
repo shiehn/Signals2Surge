@@ -222,9 +222,9 @@ Produces:
 | `--target` | *(required)* | Path to target audio WAV file |
 | `--output-dir` | `./workspace` | Output directory |
 | `--surge-plugin` | `/Library/Audio/Plug-Ins/VST3/Surge XT.vst3` | Path to Surge XT |
-| `--trials-t1` | `300` | Trials for tier 1 (structural: osc types, filters, ADSR, levels) |
-| `--trials-t2` | `300` | Trials for tier 2 (shaping: osc params, LFOs, pitch, width) |
-| `--trials-t3` | `200` | Trials for tier 3 (detail: FX, modulation depths) |
+| `--trials-t1` | `50` | Trials for tier 1 (structural: osc types, filters, ADSR, levels) |
+| `--trials-t2` | `30` | Trials for tier 2 (shaping: osc params, LFOs, pitch, width) |
+| `--trials-t3` | `20` | Trials for tier 3 (detail: FX, modulation depths) |
 | `--stages` | `1,2,3` | Which stages to run (comma-separated) |
 | `--probe-mode` | `single` | MIDI probe mode: `single`, `thorough`, `full` |
 | `--warm-start` | `false` | Use ML model to predict initial params (requires PyTorch + trained model) |

@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Optional
 
 import typer
 from rich.console import Console
+from rich.logging import RichHandler
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
+
+# Configure logging so ml/ module logs are visible
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s",
+    handlers=[RichHandler(rich_tracebacks=True, show_path=False, show_time=False)],
+)
 
 app = typer.Typer(
     name="synth2surge",
@@ -110,9 +119,9 @@ def optimize(
         Path("/Library/Audio/Plug-Ins/VST3/Surge XT.vst3"),
         help="Path to Surge XT VST3",
     ),
-    trials_t1: int = typer.Option(300, help="Trials for tier 1 (structural params)"),
-    trials_t2: int = typer.Option(300, help="Trials for tier 2 (shaping params)"),
-    trials_t3: int = typer.Option(200, help="Trials for tier 3 (detail params)"),
+    trials_t1: int = typer.Option(50, help="Trials for tier 1 (structural params)"),
+    trials_t2: int = typer.Option(30, help="Trials for tier 2 (shaping params)"),
+    trials_t3: int = typer.Option(20, help="Trials for tier 3 (detail params)"),
     stages: str = typer.Option("1,2,3", help="Optimization stages to run (comma-separated)"),
     probe_mode: str = typer.Option(
         "single", help="Probe mode: single, thorough, or full"
