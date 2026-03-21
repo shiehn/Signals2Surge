@@ -2,6 +2,10 @@
 
 > Part of the [Signals & Sorcery](https://signalsandsorcery.com) family of apps.
 
+<p align="center">
+  <img src="assets/signals2surge.jpg" alt="Synth2Surge" width="500">
+</p>
+
 Translate arbitrary VST synth patches (Serum, Vital, etc.) into sonically similar [Surge XT](https://surge-synthesizer.github.io/) patches — using black-box optimization that gets smarter over time through self-supervised machine learning.
 
 Synth2Surge has two modes:
