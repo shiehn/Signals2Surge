@@ -43,24 +43,44 @@ class WarmStarter:
         self._loaded = False
 
     def _load_model(self) -> bool:
-        """Lazy-load the latest model checkpoint."""
+        """Lazy-load the best available model checkpoint.
+
+        Priority order:
+        1. Latest trained model (from experience store)
+        2. Downloaded pretrained model (from GitHub releases)
+        """
         if not TORCH_AVAILABLE:
             return False
 
-        from synth2surge.ml.experience_store import ExperienceStore
         from synth2surge.ml.predictor import FeatureMLP
+        from synth2surge.ml.pretrained import find_pretrained
 
-        if not self._store_path.exists():
+        checkpoint_dir = None
+
+        # Try 1: latest trained model from experience store
+        if self._store_path.exists():
+            from synth2surge.ml.experience_store import ExperienceStore
+
+            store = ExperienceStore(self._store_path)
+            version = store.latest_model_version()
+            store.close()
+
+            if version is not None:
+                candidate = self._models_dir / f"predictor_{version}"
+                if (candidate / "model.pt").exists():
+                    checkpoint_dir = candidate
+                    logger.info(f"Using trained model {version}")
+
+        # Try 2: downloaded pretrained model
+        if checkpoint_dir is None:
+            pretrained = find_pretrained(self._models_dir)
+            if pretrained is not None:
+                checkpoint_dir = pretrained
+                logger.info("Using downloaded pretrained model")
+
+        if checkpoint_dir is None:
             return False
 
-        store = ExperienceStore(self._store_path)
-        version = store.latest_model_version()
-        store.close()
-
-        if version is None:
-            return False
-
-        checkpoint_dir = self._models_dir / f"predictor_{version}"
         config_path = checkpoint_dir / "config.json"
         model_path = checkpoint_dir / "model.pt"
 
@@ -77,7 +97,7 @@ class WarmStarter:
         self._model.eval()
         self._loaded = True
 
-        logger.info(f"Loaded predictor model {version} ({n_params} params)")
+        logger.info(f"Loaded predictor model from {checkpoint_dir.name} ({n_params} params)")
         return True
 
     def predict(

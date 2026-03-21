@@ -93,7 +93,28 @@ pytest tests/unit/
 
 ## Quick Start
 
-Here's a complete walkthrough you can run right now to verify the system works end-to-end. Requires Surge XT installed.
+Here's a complete walkthrough you can run right now. Requires Surge XT installed.
+
+### Option A: Use a pretrained model (fastest)
+
+If a pretrained model is available as a [GitHub release](https://github.com/shiehn/signals-to-surge/releases):
+
+```bash
+# Download the pretrained model (~1 MB)
+synth2surge train download
+
+# Capture audio from any synth
+synth2surge capture --plugin "/Library/Audio/Plug-Ins/VST3/Surge XT.vst3" --no-gui
+
+# Optimize with ML warm-start
+synth2surge optimize --target ./workspace/target_audio.wav --warm-start
+```
+
+That's it — the pretrained model provides initial parameter predictions, then CMA-ES refines them.
+
+### Option B: Train your own model
+
+If no pretrained model is available, or you want to train from scratch:
 
 ### 1. Generate a small training dataset
 
@@ -350,6 +371,51 @@ Each cycle automatically:
 | 200 | SpectrogramCNN model becomes viable with per-tier prediction heads |
 | 1,000+ | Model reliable enough to consider reducing CMA-ES trial budgets |
 | 5,000+ | Model could potentially replace CMA-ES for familiar sound categories |
+
+### Using a pretrained model
+
+Instead of training from scratch, you can download a pretrained model:
+
+```bash
+# Download from the latest GitHub release
+synth2surge train download
+
+# Or from a specific URL
+synth2surge train download --url https://example.com/pretrained-model.zip
+
+# Verify it's installed
+synth2surge train status
+```
+
+The pretrained model is stored at `workspace/models/predictor_pretrained/`. When you run `--warm-start`, the system uses your own trained model if available, otherwise falls back to the pretrained model.
+
+### Sharing a trained model
+
+After training a model you're happy with, package it for others:
+
+```bash
+# Package your best model checkpoint as a zip
+synth2surge train package \
+  --checkpoint-dir workspace/models/predictor_v50
+
+# This creates pretrained-model.zip (~1 MB)
+# Upload it as a GitHub release asset named 'pretrained-model.zip'
+```
+
+**To create a GitHub release with the model:**
+
+```bash
+# Tag a release
+git tag v0.2.0
+git push origin v0.2.0
+
+# Create the release and attach the model
+gh release create v0.2.0 pretrained-model.zip \
+  --title "v0.2.0 - Pretrained model" \
+  --notes "Includes pretrained parameter predictor trained on N patches"
+```
+
+Other users can then install it with `synth2surge train download`.
 
 ### Storage estimates
 

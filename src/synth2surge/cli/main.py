@@ -445,6 +445,69 @@ def train_status(
     store.close()
 
 
+@train_app.command("download")
+def train_download(
+    url: Optional[str] = typer.Option(
+        None, help="Direct download URL (default: latest GitHub release)"
+    ),
+    models_dir: Path = typer.Option(
+        Path("./workspace/models"), help="Directory for model checkpoints"
+    ),
+) -> None:
+    """Download a pretrained model from GitHub Releases."""
+    from synth2surge.ml.pretrained import download_pretrained
+
+    console.print("[bold]Downloading pretrained model...[/bold]")
+
+    result = download_pretrained(models_dir, url=url)
+
+    if result is None:
+        console.print("[red]Download failed. Check your internet connection.[/red]")
+        console.print(
+            "[dim]You can manually download the model from the GitHub releases page "
+            "and extract model.pt + config.json into workspace/models/predictor_pretrained/[/dim]"
+        )
+        raise typer.Exit(1)
+
+    import json
+
+    config = json.loads((result / "config.json").read_text())
+    console.print("\n[green bold]Pretrained model installed![/green bold]")
+    console.print(f"  Location:   {result}")
+    console.print(f"  Architecture: {config.get('architecture', '?')}")
+    console.print(f"  Parameters:   {config.get('n_params', '?')}")
+    console.print(f"  Trained on:   {config.get('n_training_samples', '?')} samples")
+    console.print(
+        "\n[dim]Use it with:[/dim] synth2surge optimize --target audio.wav --warm-start"
+    )
+
+
+@train_app.command("package")
+def train_package(
+    checkpoint_dir: Path = typer.Option(
+        ..., help="Path to checkpoint directory (contains model.pt + config.json)"
+    ),
+    output: Path = typer.Option(
+        Path("pretrained-model.zip"), help="Output zip file path"
+    ),
+) -> None:
+    """Package a trained model for sharing via GitHub Releases."""
+    from synth2surge.ml.pretrained import package_model_for_release
+
+    try:
+        result = package_model_for_release(checkpoint_dir, output)
+        size_kb = result.stat().st_size / 1024
+        console.print("\n[green bold]Model packaged![/green bold]")
+        console.print(f"  Output: {result} ({size_kb:.0f} KB)")
+        console.print(
+            "\n[dim]Upload this file as a GitHub release asset named "
+            "'pretrained-model.zip'[/dim]"
+        )
+    except FileNotFoundError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+
 @train_app.command("loop")
 def train_loop(
     surge_plugin: Path = typer.Option(
