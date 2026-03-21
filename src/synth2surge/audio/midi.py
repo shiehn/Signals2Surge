@@ -3,6 +3,10 @@
 The MIDI probe is a fixed sequence of MIDI messages used to render audio
 through both the source and target plugins. Using the same probe ensures
 that spectral differences reflect timbre, not performance differences.
+
+Pedalboard expects MIDI messages as a list of ([status, data1, data2], time)
+tuples, where the first element is the MIDI bytes and the second is the
+timestamp in seconds.
 """
 
 from __future__ import annotations
@@ -14,23 +18,17 @@ from synth2surge.config import MidiProbeConfig, MultiProbeConfig, ProbeType
 
 def create_probe(
     config: MidiProbeConfig | None = None,
-) -> list[tuple[float, int, int, int]]:
-    """Create a MIDI probe as a list of (time_seconds, status, data1, data2) tuples.
-
-    Pedalboard expects MIDI messages as a list of tuples:
-    (time_in_seconds, status_byte, data1, data2)
+) -> MidiMessages:
+    """Create a MIDI probe as a list of (midi_bytes, time) tuples.
 
     Returns a note-on/note-off pair with the configured timing.
     """
     if config is None:
         config = MidiProbeConfig()
 
-    note_on_status = 0x90  # Note On, channel 1
-    note_off_status = 0x80  # Note Off, channel 1
-
-    messages = [
-        (0.0, note_on_status, config.note, config.velocity),
-        (config.sustain_seconds, note_off_status, config.note, 0),
+    messages: MidiMessages = [
+        ([NOTE_ON, config.note, config.velocity], 0.0),
+        ([NOTE_OFF, config.note, 0], config.sustain_seconds),
     ]
     return messages
 
@@ -49,7 +47,8 @@ def probe_duration(config: MidiProbeConfig | None = None) -> float:
 NOTE_ON = 0x90
 NOTE_OFF = 0x80
 
-MidiMessages = list[tuple[float, int, int, int]]
+# Each message is ([status_byte, data1, data2], timestamp_seconds)
+MidiMessages = list[tuple[list[int], float]]
 
 
 def create_sustained_probe(
@@ -62,8 +61,8 @@ def create_sustained_probe(
     msgs: MidiMessages = []
     t = 0.0
     for note in notes:
-        msgs.append((t, NOTE_ON, note, velocity))
-        msgs.append((t + sustain_s, NOTE_OFF, note, 0))
+        msgs.append(([NOTE_ON, note, velocity], t))
+        msgs.append(([NOTE_OFF, note, 0], t + sustain_s))
         t += sustain_s + release_s
     return msgs
 
@@ -78,8 +77,8 @@ def create_velocity_probe(
     msgs: MidiMessages = []
     t = 0.0
     for vel in velocities:
-        msgs.append((t, NOTE_ON, note, vel))
-        msgs.append((t + sustain_s, NOTE_OFF, note, 0))
+        msgs.append(([NOTE_ON, note, vel], t))
+        msgs.append(([NOTE_OFF, note, 0], t + sustain_s))
         t += sustain_s + release_s
     return msgs
 
@@ -95,8 +94,8 @@ def create_staccato_probe(
     msgs: MidiMessages = []
     t = 0.0
     for _ in range(n_hits):
-        msgs.append((t, NOTE_ON, note, velocity))
-        msgs.append((t + hit_duration, NOTE_OFF, note, 0))
+        msgs.append(([NOTE_ON, note, velocity], t))
+        msgs.append(([NOTE_OFF, note, 0], t + hit_duration))
         t += hit_duration + gap
     return msgs
 
@@ -110,9 +109,9 @@ def create_chord_probe(
     """All note-ons simultaneous, all note-offs simultaneous."""
     msgs: MidiMessages = []
     for note in notes:
-        msgs.append((0.0, NOTE_ON, note, velocity))
+        msgs.append(([NOTE_ON, note, velocity], 0.0))
     for note in notes:
-        msgs.append((sustain_s, NOTE_OFF, note, 0))
+        msgs.append(([NOTE_OFF, note, 0], sustain_s))
     return msgs
 
 
@@ -125,8 +124,8 @@ def create_bass_line_probe(
     msgs: MidiMessages = []
     t = 0.0
     for note in notes:
-        msgs.append((t, NOTE_ON, note, velocity))
-        msgs.append((t + note_duration, NOTE_OFF, note, 0))
+        msgs.append(([NOTE_ON, note, velocity], t))
+        msgs.append(([NOTE_OFF, note, 0], t + note_duration))
         t += note_duration
     return msgs
 
@@ -140,8 +139,8 @@ def create_melody_probe(
     msgs: MidiMessages = []
     t = 0.0
     for note in notes:
-        msgs.append((t, NOTE_ON, note, velocity))
-        msgs.append((t + note_duration, NOTE_OFF, note, 0))
+        msgs.append(([NOTE_ON, note, velocity], t))
+        msgs.append(([NOTE_OFF, note, 0], t + note_duration))
         t += note_duration
     return msgs
 
@@ -157,9 +156,9 @@ def create_chord_progression_probe(
     t = 0.0
     for chord in chords:
         for note in chord:
-            msgs.append((t, NOTE_ON, note, velocity))
+            msgs.append(([NOTE_ON, note, velocity], t))
         for note in chord:
-            msgs.append((t + chord_duration, NOTE_OFF, note, 0))
+            msgs.append(([NOTE_OFF, note, 0], t + chord_duration))
         t += chord_duration + release_s
     return msgs
 
@@ -176,9 +175,9 @@ def create_comping_probe(
     t = 0.0
     for _ in range(n_hits):
         for note in chord_notes:
-            msgs.append((t, NOTE_ON, note, velocity))
+            msgs.append(([NOTE_ON, note, velocity], t))
         for note in chord_notes:
-            msgs.append((t + hit_duration, NOTE_OFF, note, 0))
+            msgs.append(([NOTE_OFF, note, 0], t + hit_duration))
         t += hit_duration + gap
     return msgs
 
@@ -194,8 +193,8 @@ def create_percussive_probe(
     msgs: MidiMessages = []
     t = 0.0
     for _ in range(n_hits):
-        msgs.append((t, NOTE_ON, note, velocity))
-        msgs.append((t + hit_duration, NOTE_OFF, note, 0))
+        msgs.append(([NOTE_ON, note, velocity], t))
+        msgs.append(([NOTE_OFF, note, 0], t + hit_duration))
         t += hit_duration + decay_s
     return msgs
 
@@ -210,8 +209,8 @@ def create_legato_probe(
     msgs: MidiMessages = []
     t = 0.0
     for note in notes:
-        msgs.append((t, NOTE_ON, note, velocity))
-        msgs.append((t + note_duration, NOTE_OFF, note, 0))
+        msgs.append(([NOTE_ON, note, velocity], t))
+        msgs.append(([NOTE_OFF, note, 0], t + note_duration))
         t += note_duration - overlap
     return msgs
 
@@ -225,8 +224,8 @@ def create_interval_jump_probe(
     msgs: MidiMessages = []
     t = 0.0
     for note in notes:
-        msgs.append((t, NOTE_ON, note, velocity))
-        msgs.append((t + note_duration, NOTE_OFF, note, 0))
+        msgs.append(([NOTE_ON, note, velocity], t))
+        msgs.append(([NOTE_OFF, note, 0], t + note_duration))
         t += note_duration
     return msgs
 
@@ -259,7 +258,7 @@ def _probe_duration_from_messages(msgs: MidiMessages) -> float:
     """Duration of a probe based on its last message timestamp."""
     if not msgs:
         return 0.0
-    return max(t for t, _, _, _ in msgs)
+    return max(t for _, t in msgs)
 
 
 def _generate_probe_messages(probe) -> tuple[MidiMessages, float]:
@@ -340,24 +339,9 @@ def _generate_probe_messages(probe) -> tuple[MidiMessages, float]:
             probe.notes, probe.velocities[0], probe.sustain_seconds, probe.release_seconds
         )
 
-    # Compute the duration: last message time + release tail for types that have one
+    # Compute the duration: last message time + release tail
     last_msg_time = _probe_duration_from_messages(msgs)
-    if pt in (
-        ProbeType.SUSTAINED, ProbeType.SUB_BASS, ProbeType.VELOCITY,
-        ProbeType.CHORD, ProbeType.CHORD_PROGRESSION,
-    ):
-        duration = last_msg_time + probe.release_seconds
-    elif pt == ProbeType.STACCATO:
-        duration = last_msg_time + probe.release_seconds
-    elif pt == ProbeType.COMPING:
-        duration = last_msg_time + probe.release_seconds
-    elif pt == ProbeType.PERCUSSIVE:
-        duration = last_msg_time + probe.release_seconds
-    elif pt == ProbeType.LEGATO:
-        duration = last_msg_time + probe.release_seconds
-    else:
-        # BASS_LINE, MELODY, INTERVAL_JUMP — no extra release beyond what's in messages
-        duration = last_msg_time + probe.release_seconds
+    duration = last_msg_time + probe.release_seconds
 
     return msgs, duration
 
@@ -376,7 +360,7 @@ def compose_multi_probe(config: MultiProbeConfig, sample_rate: int = 44100) -> M
         msgs, duration = _generate_probe_messages(probe_def)
 
         # Offset all timestamps by current_time
-        offset_msgs = [(t + current_time, s, d1, d2) for t, s, d1, d2 in msgs]
+        offset_msgs: MidiMessages = [(midi_bytes, t + current_time) for midi_bytes, t in msgs]
         all_messages.extend(offset_msgs)
 
         start_sample = int(current_time * sample_rate)

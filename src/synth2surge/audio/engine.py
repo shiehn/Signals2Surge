@@ -41,7 +41,7 @@ class PluginHost:
 
     def render_midi(
         self,
-        midi_messages: list[tuple[float, int, int, int]] | None = None,
+        midi_messages: list[tuple[list[int], float]] | None = None,
         duration: float | None = None,
         midi_config: MidiProbeConfig | None = None,
     ) -> np.ndarray:
@@ -68,7 +68,7 @@ class PluginHost:
 
     def render_midi_mono(
         self,
-        midi_messages: list[tuple[float, int, int, int]] | None = None,
+        midi_messages: list[tuple[list[int], float]] | None = None,
         duration: float | None = None,
         midi_config: MidiProbeConfig | None = None,
     ) -> np.ndarray:
