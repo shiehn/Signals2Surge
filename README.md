@@ -18,7 +18,7 @@ The system is a closed loop: it randomizes Surge XT parameters, renders audio, t
 ```
 Target Audio (WAV)                 Surge XT
 ┌─────────────────────┐           ┌────────────────────────┐
-│  User-provided or   │           │  ~280 active params    │
+│  User-provided or   │           │  ~500 active params    │
 │  captured from a    │           │  (normalized 0-1)      │
 │  source plugin      │           └──────────┬─────────────┘
 └─────────┬───────────┘                      │
@@ -233,7 +233,7 @@ synth2surge optimize --target ./workspace/target_audio.wav --stages 1 --trials-t
 
 ### Staged optimization explained
 
-CMA-ES works well up to ~200 dimensions. Surge XT has ~280 active parameters, so the optimizer runs in 3 stages, each tackling a different tier while freezing previous results:
+CMA-ES works well up to ~200 dimensions. Surge XT has ~500 active parameters (scene A + globals), so the optimizer runs in 3 stages, each tackling a different tier while freezing previous results:
 
 | Stage | Tier | Parameters | What it controls |
 |---|---|---|---|
@@ -249,7 +249,7 @@ The ML system is what makes Synth2Surge unique. It has a **closed training loop*
 
 ### The core idea
 
-1. **Randomize** all ~280 Surge XT parameters to uniform [0, 1]
+1. **Randomize** all ~500 Surge XT parameters to uniform [0, 1]
 2. **Render** audio through Surge XT with semi-random MIDI (random notes, velocities, durations)
 3. **Extract** a 512-dimensional audio feature vector (mel-spectrogram statistics)
 4. **Store** the pair `(audio_features, parameters)` — this IS the ground truth label, no human labeling needed
@@ -417,6 +417,82 @@ gh release create v0.2.0 pretrained-model.zip \
 
 Other users can then install it with `synth2surge train download`.
 
+### Full training runbook
+
+This is the complete sequence of commands to train a production-quality model from scratch. Surge XT and PyTorch must be installed. Expect ~2-3 hours total on an M1/M3 Mac.
+
+```bash
+# ──────────────────────────────────────────────────────────────
+# STEP 1: Generate training data (~2 hours)
+# ──────────────────────────────────────────────────────────────
+# Each invocation renders ~15 random Surge XT patches.
+# ~30% produce audible sound, so 15 attempts ≈ 5 usable patches.
+# We run many batches with different seeds to accumulate data.
+# Target: 200+ patches for a useful model, 1000+ for a good one.
+
+# Generate in batches of 15 (larger counts may crash the VST3 plugin)
+for i in $(seq 1 200); do
+  synth2surge data generate --mode render-only --count 15 --seed $i --no-resume
+done
+
+# Check progress at any time
+synth2surge data status
+
+# ──────────────────────────────────────────────────────────────
+# STEP 2: Train the model (~30 seconds)
+# ──────────────────────────────────────────────────────────────
+synth2surge train run
+
+# Check the result
+synth2surge train status
+
+# ──────────────────────────────────────────────────────────────
+# STEP 3: Verify the model works
+# ──────────────────────────────────────────────────────────────
+# Capture target audio from Surge XT's default patch
+synth2surge capture \
+  --plugin "/Library/Audio/Plug-Ins/VST3/Surge XT.vst3" \
+  --no-gui
+
+# Optimize with warm-start and compare to cold
+synth2surge optimize \
+  --target ./workspace/target_audio.wav \
+  --stages 1 \
+  --trials-t1 50 \
+  --warm-start
+
+# ──────────────────────────────────────────────────────────────
+# STEP 4: Package and share (optional)
+# ──────────────────────────────────────────────────────────────
+# Find the latest model version
+synth2surge train status
+# → shows "Latest model: vN"
+
+# Package it
+synth2surge train package \
+  --checkpoint-dir workspace/models/predictor_vN
+
+# Upload to GitHub releases
+gh release create v0.2.0 pretrained-model.zip \
+  --title "v0.2.0 — Pretrained model" \
+  --notes "Trained on N patches, val_loss=X.XXX"
+```
+
+**Time estimates (M1/M3 Mac):**
+
+| Step | Time | Notes |
+|---|---|---|
+| Generate 200 patches | ~20 min | 200 batches x ~6s each |
+| Generate 1,000 patches | ~2 hours | 200 batches x 15 attempts each |
+| Train model | ~30 seconds | On 1,000 patches, 200 epochs |
+| Package model | < 1 second | Just zips model.pt + config.json |
+
+**Tips:**
+- You can interrupt and resume data generation — each run appends to the database
+- Run `synth2surge data status` any time to check progress
+- You can train intermediate models (`synth2surge train run`) while still generating data
+- The training loop command (`synth2surge train loop`) automates steps 1-2 but is limited to 15 patches per cycle
+
 ### Storage estimates
 
 | Scale | Database size |
@@ -580,7 +656,7 @@ src/synth2surge/
 
 #### Plugin hosting via pedalboard's `raw_value` API
 
-Surge XT exposes ~280 active parameters through pedalboard, each with a `raw_value` property normalized to [0, 1]. The optimizer works directly with these raw values, bypassing XML patch manipulation during the optimization loop. The plugin handles internal domain mapping (cutoff in Hz, time in log-seconds, etc.) transparently.
+Surge XT exposes ~500 active parameters (scene A + globals) through pedalboard, each with a `raw_value` property normalized to [0, 1]. The optimizer works directly with these raw values, bypassing XML patch manipulation during the optimization loop. The plugin handles internal domain mapping (cutoff in Hz, time in log-seconds, etc.) transparently.
 
 #### Enriched MR-STFT loss
 
@@ -598,7 +674,7 @@ All components use librosa (already a dependency). Total overhead: ~5ms per eval
 
 #### Staged CMA-ES optimization
 
-CMA-ES works well up to ~200 dimensions. With ~280 active parameters, the 3-tier staged approach optimizes the most impactful parameters first, then freezes those values and refines secondary parameters, then detail parameters. Each stage runs an independent CMA-ES sampler.
+CMA-ES works well up to ~200 dimensions. With ~500 active parameters (scene A + globals), the 3-tier staged approach optimizes the most impactful parameters first, then freezes those values and refines secondary parameters, then detail parameters. Each stage runs an independent CMA-ES sampler.
 
 #### ML parameter predictor (two architectures)
 
@@ -608,7 +684,7 @@ Input: 512-dim mel-spectrogram statistics
   → Linear(512, 512) + LayerNorm + GELU + Dropout(0.1)
   → Linear(512, 512) + LayerNorm + GELU + Dropout(0.1)
   → Linear(512, N_params) + Sigmoid
-Output: [0,1] parameter predictions for all ~280 Surge XT params
+Output: [0,1] parameter predictions for all Surge XT scene A params
 ```
 
 **SpectrogramCNN** (~350K parameters, used when >= 200 training examples):
