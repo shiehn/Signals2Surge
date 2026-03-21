@@ -71,7 +71,7 @@ Target Audio (WAV)                 Surge XT
 ## Installation
 
 ```bash
-# 1. Install uv
+# 1. Install uv (if not already installed)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # 2. Clone and install
@@ -86,7 +86,68 @@ uv pip install torch
 
 # 4. Verify
 synth2surge --help
-uv run --extra dev pytest tests/unit/
+pytest tests/unit/
+```
+
+> **Note:** All CLI examples below assume you've activated the virtual environment (`source .venv/bin/activate`). If you haven't, prefix commands with `uv run`, e.g. `uv run synth2surge --help`.
+
+## Quick Start
+
+Here's a complete walkthrough you can run right now to verify the system works end-to-end. Requires Surge XT installed.
+
+### 1. Generate a small training dataset
+
+```bash
+# Generate 15 random patches (~30 seconds, produces ~5 non-silent patches)
+synth2surge data generate --mode render-only --count 15 --seed 42
+
+# Generate more with a different seed to accumulate data
+synth2surge data generate --mode render-only --count 15 --seed 100 --no-resume
+synth2surge data generate --mode render-only --count 15 --seed 200 --no-resume
+
+# Check how much data we have
+synth2surge data status
+```
+
+> **Note:** Only ~30% of fully randomized patches produce audible sound (the rest have volume/level params at zero). This is expected — the generator automatically skips silent patches. Run the command multiple times with different `--seed` values to accumulate data.
+
+> **Note:** Use `--count 15` or less per invocation. Larger counts may cause pedalboard to crash due to VST3 plugin memory limits. Run the command multiple times to build up your dataset.
+
+### 2. Train a model
+
+```bash
+# Train on accumulated data (need at least 10 patches)
+synth2surge train run
+
+# Check training status
+synth2surge train status
+```
+
+### 3. Capture target audio and optimize
+
+```bash
+# Capture audio from Surge XT's default patch
+synth2surge capture --plugin "/Library/Audio/Plug-Ins/VST3/Surge XT.vst3" --no-gui
+
+# Quick optimization (stage 1 only, 50 trials)
+synth2surge optimize \
+  --target ./workspace/target_audio.wav \
+  --stages 1 \
+  --trials-t1 50
+
+# With ML warm-start (if you've trained a model)
+synth2surge optimize \
+  --target ./workspace/target_audio.wav \
+  --stages 1 \
+  --trials-t1 50 \
+  --warm-start
+```
+
+### 4. Inspect the result
+
+```bash
+ls workspace/best_patch.*
+# workspace/best_patch.bin  workspace/best_patch.fxp  (load the .fxp in your DAW)
 ```
 
 ---
@@ -149,12 +210,6 @@ Produces:
 synth2surge optimize --target ./workspace/target_audio.wav --stages 1 --trials-t1 50
 ```
 
-**With ML warm-start** (after training):
-
-```bash
-synth2surge optimize --target ./workspace/target_audio.wav --warm-start
-```
-
 ### Staged optimization explained
 
 CMA-ES works well up to ~200 dimensions. Surge XT has ~280 active parameters, so the optimizer runs in 3 stages, each tackling a different tier while freezing previous results:
@@ -188,33 +243,35 @@ At inference time, a user provides only an audio file. The model extracts audio 
 #### 1. Generate training data
 
 ```bash
-# Fast mode: randomize params, render, store (~2 seconds per patch, no optimization)
-synth2surge data generate --mode render-only --count 1000
+# Generate 15 random patches per run (~30 seconds each)
+# Only ~30% produce audible sound — this is expected
+synth2surge data generate --mode render-only --count 15 --seed 42
 
-# Slower mode: also runs CMA-ES to generate trial-level data (~5 min per patch)
-synth2surge data generate --mode optimize --count 50 --trials 200
-
-# Use Surge XT factory presets as ground truth (known-good, musically useful patches)
-synth2surge data generate --mode factory --count 100
+# Run multiple times with different seeds to accumulate data
+synth2surge data generate --mode render-only --count 15 --seed 100 --no-resume
+synth2surge data generate --mode render-only --count 15 --seed 200 --no-resume
+synth2surge data generate --mode render-only --count 15 --seed 300 --no-resume
 ```
+
+> **Important:** Use `--count 15` or less per invocation. The VST3 plugin can crash with larger batch sizes due to memory limits. Use `--no-resume` with different `--seed` values for each run to ensure unique patches are generated.
 
 | Flag | Default | Description |
 |---|---|---|
 | `--mode` | `render-only` | `render-only` (fast), `optimize` (rich), or `factory` (known presets) |
-| `--count` | `100` | Number of patches to generate |
+| `--count` | `100` | Number of patch attempts (use 15 or less) |
 | `--surge-plugin` | `/Library/Audio/Plug-Ins/VST3/Surge XT.vst3` | Path to Surge XT |
-| `--db-path` | `./workspace/experience.db` | SQLite database path |
+| `--db-path` | `workspace/experience.db` | SQLite database path |
 | `--trials` | `200` | CMA-ES trials per run (optimize mode only) |
 | `--seed` | `42` | Random seed for reproducibility |
-| `--resume` | `true` | Skip if store already has enough data |
+| `--no-resume` | *(flag)* | Force generation even if store already has data |
 
 **Data generation modes compared:**
 
 | Mode | Speed | What it stores | Best for |
 |---|---|---|---|
-| `render-only` | ~1,800 patches/hour | Ground truth `(features, params)` pairs | Bootstrapping: accumulate lots of data fast |
-| `optimize` | ~12 patches/hour | Ground truth + ~200 `(params, loss)` trial rows per run | Richer training signal for the audio encoder |
-| `factory` | ~1,800 patches/hour | Factory preset ground truth pairs | High-quality, musically meaningful data |
+| `render-only` | ~5 audible patches per 15 attempts | Ground truth `(features, params)` pairs | Bootstrapping: accumulate lots of data fast |
+| `optimize` | ~5 min per patch | Ground truth + ~200 `(params, loss)` trial rows per run | Richer training signal for the audio encoder |
+| `factory` | ~2s per patch | Factory preset ground truth pairs | High-quality, musically meaningful data |
 
 #### 2. Check data status
 
@@ -230,12 +287,12 @@ Shows total runs, trials, loss statistics, and how close you are to model readin
 synth2surge train run
 ```
 
-Trains a FeatureMLP predictor on all accumulated data. Saves a versioned checkpoint to `workspace/models/`.
+Trains a FeatureMLP predictor on all accumulated data. Saves a versioned checkpoint to `workspace/models/`. Requires at least 10 training examples.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--db-path` | `./workspace/experience.db` | Experience store path |
-| `--models-dir` | `./workspace/models` | Checkpoint output directory |
+| `--db-path` | `workspace/experience.db` | Experience store path |
+| `--models-dir` | `workspace/models` | Checkpoint output directory |
 | `--max-epochs` | `200` | Maximum training epochs |
 | `--patience` | `20` | Early stopping patience |
 | `--lr` | `0.001` | Learning rate |
@@ -268,7 +325,7 @@ For hands-off training, run the full cycle in one command:
 ```bash
 synth2surge train loop \
   --cycles 10 \
-  --patches-per-cycle 200 \
+  --patches-per-cycle 15 \
   --trials 200
 ```
 
@@ -277,12 +334,10 @@ Each cycle automatically:
 2. Trains/retrains the predictor on all accumulated data
 3. Reports metrics (loss, model version, data count)
 
-Leave it running overnight or over a weekend to build up training data.
-
 | Flag | Default | Description |
 |---|---|---|
 | `--cycles` | `10` | Number of generate-then-train cycles |
-| `--patches-per-cycle` | `100` | Patches to generate per cycle |
+| `--patches-per-cycle` | `100` | Patches to attempt per cycle (use 15 or less) |
 | `--trials` | `200` | CMA-ES trials for the optimization fraction |
 | `--seed` | `42` | Random seed |
 
@@ -336,6 +391,32 @@ synth2surge serve --host 127.0.0.1 --port 8000
 | `GET` | `/jobs/{job_id}` | Poll job status and progress |
 | `POST` | `/jobs/{job_id}/cancel` | Cancel a running job |
 | `GET` | `/prior/status` | Check FAISS prior index status |
+
+---
+
+## Troubleshooting
+
+### "Segmentation fault" during data generation
+
+The VST3 plugin can crash after processing many patches in a single process. Use `--count 15` or less per invocation and run the command multiple times with different `--seed` values.
+
+### "Generated 0 patches"
+
+Most fully randomized Surge XT parameter configurations produce silence (volume at 0, oscillators muted, etc.). This is normal. Run the command a few times with different seeds — typically ~30% of attempts produce audible patches.
+
+### "Not enough training data"
+
+You need at least 10 non-silent patches before training will start. Run `synth2surge data status` to check your current count, then generate more data.
+
+### PyTorch not installed
+
+The `--warm-start` flag and `synth2surge train` commands require PyTorch. Install it with:
+
+```bash
+uv pip install torch
+```
+
+The core optimization (`synth2surge optimize` without `--warm-start`) works without PyTorch.
 
 ---
 
@@ -528,30 +609,37 @@ This is the foundation everything else builds on — every optimization run gene
 
 ## Testing
 
-207 unit tests covering all modules, plus integration, acceptance, and end-to-end tests.
+232 tests across unit, integration, and end-to-end levels.
 
 ```bash
 # All unit tests (no plugins required, ~3 seconds)
-uv run --extra dev pytest tests/unit/
+pytest tests/unit/
+
+# ML e2e tests (requires PyTorch, no plugins required, ~10 seconds)
+pytest tests/e2e/test_ml_training_loop.py
+
+# Real Surge XT e2e tests (requires Surge XT + PyTorch, ~2 minutes)
+pytest tests/e2e/test_ml_surge_rendering.py
 
 # All tests (requires Surge XT for integration/e2e)
-uv run --extra dev pytest
+pytest
 
 # With coverage
-uv run --extra dev pytest --cov=synth2surge --cov-report=term-missing
+pytest --cov=synth2surge --cov-report=term-missing
 
 # Lint
-uv run --extra dev ruff check src/ tests/
+ruff check src/ tests/
 ```
 
 Tests that require Surge XT are marked `@pytest.mark.requires_surge` and auto-skip if it's not installed. ML tests auto-skip if PyTorch is not installed.
 
 | Level | What it validates |
 |---|---|
-| **Unit** | Loss math, XML parsing, parameter normalization, MIDI generation, FAISS indexing, CLI args, API routes, experience store, ML models, training, warm-start |
+| **Unit** (207) | Loss math, XML parsing, parameter normalization, MIDI generation, FAISS indexing, CLI args, API routes, experience store, ML models, training, warm-start |
+| **E2E synthetic** (18) | Full ML pipeline with synthetic audio: generate → train → predict → evaluate. Model predictions 30% better than random. |
+| **E2E Surge XT** (7) | Real plugin rendering, data generation, optimization, and closed-loop: generate → train → warm-start predict with actual Surge XT audio |
 | **Integration** | Plugin loading, audio rendering, state round-trip, optimizer convergence |
 | **Acceptance** | Loss ranking correctness, feature similarity, self-translation quality |
-| **E2E** | Full capture → optimize pipeline, CLI workflow |
 
 ## License
 
