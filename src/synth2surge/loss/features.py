@@ -1,9 +1,18 @@
-"""Feature extraction for FAISS indexing — produces fixed-length audio fingerprints."""
+"""Feature extraction for FAISS indexing — produces fixed-length audio fingerprints.
+
+Supports two modes:
+- Hand-crafted: 512-dim mel-spectrogram statistics (default)
+- Learned: 128-dim encoder embeddings (when a trained encoder is available)
+"""
 
 from __future__ import annotations
 
+import logging
+
 import librosa
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 def extract_features(
@@ -53,3 +62,39 @@ def extract_features(
         features /= norm
 
     return features
+
+
+def extract_features_learned(
+    audio: np.ndarray,
+    encoder: object,
+    sr: int = 44100,
+    n_mels: int = 128,
+) -> np.ndarray:
+    """Extract features using a trained audio encoder.
+
+    Returns a 128-dim L2-normalized embedding from the AudioEncoder.
+    Falls back to hand-crafted features if the encoder fails.
+
+    Args:
+        audio: Mono audio signal (1-D float array).
+        encoder: Trained AudioEncoder model.
+        sr: Sample rate.
+        n_mels: Number of mel bands.
+
+    Returns:
+        L2-normalized feature vector of shape (embed_dim,).
+    """
+    try:
+        import torch
+
+        from synth2surge.ml.hybrid_loss import _audio_to_mel_tensor
+
+        mel_tensor = _audio_to_mel_tensor(audio, sr=sr, n_mels=n_mels)
+        encoder.eval()
+        with torch.no_grad():
+            embedding = encoder(mel_tensor).squeeze(0).numpy()
+        return embedding.astype(np.float32)
+
+    except Exception:
+        logger.warning("Learned feature extraction failed, falling back to hand-crafted")
+        return extract_features(audio, sr=sr, n_mels=n_mels)

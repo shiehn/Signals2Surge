@@ -51,6 +51,16 @@ class OptimizationProgress:
 
 
 @dataclass
+class MLPrediction:
+    """Result of an ML parameter prediction."""
+
+    predicted_params: dict[str, float]
+    confidence: float
+    sigma0: float
+    model_version: str | None = None
+
+
+@dataclass
 class OptimizationResult:
     """Final result of an optimization run."""
 
@@ -59,3 +69,6 @@ class OptimizationResult:
     best_audio_path: Path
     total_trials: int
     stages_completed: int
+    fxp_path: Path | None = None
+    warm_started: bool = False
+    model_version: str | None = None

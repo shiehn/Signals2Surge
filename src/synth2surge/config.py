@@ -253,6 +253,37 @@ class OptimizationConfig(BaseSettings):
     storage_path: Path = Path("workspace/optuna.db")
 
 
+class MLConfig(BaseSettings):
+    """Machine learning configuration."""
+
+    store_path: Path = Path("workspace/experience.db")
+    models_dir: Path = Path("workspace/models")
+    retrain_interval: int = 25  # retrain after every N new runs
+    min_runs_for_mlp: int = 50  # minimum runs before MLP warm-start
+    min_runs_for_cnn: int = 200  # minimum runs before CNN warm-start
+    confidence_threshold: float = 0.3  # below this, fall back to pure CMA-ES
+    warm_start_enabled: bool = True
+
+
+class EnrichedLossConfig(BaseSettings):
+    """Enriched loss function weights (Phase 3)."""
+
+    w_stft: float = 0.6
+    w_mfcc: float = 0.15
+    w_envelope: float = 0.1
+    w_centroid: float = 0.1
+    w_flux: float = 0.05
+
+
+class LearnedLossConfig(BaseSettings):
+    """Learned audio encoder configuration (Phase 3)."""
+
+    alpha: float = 0.0  # blend weight for learned similarity (0 = pure MR-STFT)
+    max_alpha: float = 0.3
+    encoder_checkpoint: Path | None = None
+    min_runs_for_encoder: int = 200
+
+
 class AppConfig(BaseSettings):
     """Top-level application configuration."""
 
@@ -261,6 +292,9 @@ class AppConfig(BaseSettings):
     loss: LossConfig = Field(default_factory=LossConfig)
     surge: SurgeConfig = Field(default_factory=SurgeConfig)
     optimization: OptimizationConfig = Field(default_factory=OptimizationConfig)
+    ml: MLConfig = Field(default_factory=MLConfig)
+    enriched_loss: EnrichedLossConfig = Field(default_factory=EnrichedLossConfig)
+    learned_loss: LearnedLossConfig = Field(default_factory=LearnedLossConfig)
     workspace_dir: Path = Path("workspace")
 
     def ensure_workspace(self) -> Path:

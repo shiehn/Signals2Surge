@@ -101,6 +101,8 @@ def optimize(
     output_dir: Path | None = None,
     multi_probe_config: MultiProbeConfig | None = None,
     target_segments: list[np.ndarray] | None = None,
+    experience_store: object | None = None,
+    _run_id: str | None = None,
 ) -> OptimizationResult:
     """Run multi-stage CMA-ES optimization to match target audio.
 
@@ -118,6 +120,8 @@ def optimize(
         output_dir: Directory to save results (default: workspace/).
         multi_probe_config: Optional multi-probe config for thorough/full mode.
         target_segments: Pre-computed target audio segments (required for multi-probe).
+        experience_store: Optional ExperienceStore for logging trials.
+        _run_id: Internal run ID (used by data generator).
 
     Returns:
         OptimizationResult with best patch path, loss, and metadata.
@@ -155,6 +159,9 @@ def optimize(
         2: config.n_trials_tier2,
         3: config.n_trials_tier3,
     }
+
+    # Canonical param ordering for experience store
+    _all_param_names = sorted(surge_host.parameter_names())
 
     best_loss = float("inf")
     best_raw_values: dict[str, float] = {}
@@ -222,6 +229,15 @@ def optimize(
             all_losses.append(loss)
             completed_trials += 1
 
+            # Log trial to experience store if available
+            if experience_store is not None and _run_id is not None:
+                trial_params = np.array(
+                    [all_values.get(n, 0.0) for n in _all_param_names], dtype=np.float32
+                )
+                experience_store.log_trial(
+                    _run_id, stage, completed_trials, trial_params, loss
+                )
+
             if progress_callback is not None:
                 progress_callback(
                     OptimizationProgress(
@@ -238,6 +254,10 @@ def optimize(
 
         study.optimize(objective, n_trials=n_trials)
 
+        # Flush any pending trial writes
+        if experience_store is not None:
+            experience_store.flush()
+
         # Freeze best values from this stage for subsequent stages
         if study.best_trial is not None:
             for name in active_param_names:
@@ -253,6 +273,11 @@ def optimize(
     best_patch_path = output_dir / "best_patch.bin"
     best_patch_path.write_bytes(best_state)
 
+    # Export as FXP
+    from synth2surge.surge.fxp_export import state_to_fxp
+
+    fxp_path = state_to_fxp(best_state, output_dir / "best_patch.fxp")
+
     # Render and save best audio
     surge_host.reset()
     best_audio = surge_host.render_midi_mono(midi_config=midi_config)
@@ -267,4 +292,5 @@ def optimize(
         best_audio_path=best_audio_path,
         total_trials=completed_trials,
         stages_completed=len(stages),
+        fxp_path=fxp_path,
     )

@@ -1,0 +1,332 @@
+"""Autonomous self-play data generation for ML training.
+
+Generates unlimited labeled (audio_features, parameters) pairs by:
+1. Randomizing Surge XT parameters to uniform [0,1]
+2. Rendering audio with semi-random MIDI probes
+3. Extracting features and storing as ground truth
+
+Can optionally run CMA-ES optimization to generate trial-level data.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import random
+from pathlib import Path
+from typing import Callable
+
+import numpy as np
+
+from synth2surge.config import MidiProbeConfig
+from synth2surge.loss.features import extract_features
+from synth2surge.ml.experience_store import ExperienceStore
+
+logger = logging.getLogger(__name__)
+
+
+def _random_midi_config(rng: random.Random) -> MidiProbeConfig:
+    """Generate a semi-random MIDI probe configuration."""
+    return MidiProbeConfig(
+        note=rng.randint(36, 84),
+        velocity=rng.randint(60, 127),
+        sustain_seconds=rng.uniform(1.5, 4.0),
+        release_seconds=rng.uniform(0.5, 2.0),
+    )
+
+
+def generate_render_only(
+    surge_plugin_path: str | Path,
+    store: ExperienceStore,
+    count: int = 100,
+    *,
+    sample_rate: int = 44100,
+    seed: int = 42,
+    progress_callback: Callable[[int, int], None] | None = None,
+    resume: bool = True,
+) -> int:
+    """Generate training data by randomizing params and rendering audio.
+
+    This is the fastest mode (~2s per patch). No optimization is run.
+    Each patch produces a clean (features, ground_truth_params) pair.
+
+    Args:
+        surge_plugin_path: Path to Surge XT VST3.
+        store: ExperienceStore to write data to.
+        count: Number of random patches to generate.
+        sample_rate: Audio sample rate.
+        seed: Random seed for reproducibility.
+        progress_callback: Called with (completed, total) after each patch.
+        resume: If True, skip patches if store already has enough data.
+
+    Returns:
+        Number of patches successfully generated.
+    """
+    from synth2surge.audio.engine import PluginHost
+
+    if resume:
+        existing = store.count()
+        if existing >= count:
+            logger.info(f"Store already has {existing} runs, skipping generation")
+            return 0
+        # Adjust seed to avoid re-generating same patches
+        seed += existing
+
+    host = PluginHost(surge_plugin_path, sample_rate=sample_rate)
+    param_names = sorted(host.parameter_names())
+    rng = random.Random(seed)
+    np_rng = np.random.RandomState(seed)
+
+    generated = 0
+    for i in range(count):
+        run_id = store.new_run_id()
+        try:
+            # 1. Randomize all parameters
+            random_values = {name: float(np_rng.uniform(0.0, 1.0)) for name in param_names}
+            host.set_raw_values(random_values)
+            host.reset()
+
+            # 2. Generate semi-random MIDI and render
+            midi_config = _random_midi_config(rng)
+            audio = host.render_midi_mono(midi_config=midi_config)
+
+            # 3. Skip silent patches
+            rms = float(np.sqrt(np.mean(audio**2)))
+            if rms < 1e-6:
+                logger.debug(f"Patch {i} is silent, skipping")
+                continue
+
+            # 4. Extract features
+            features = extract_features(audio, sr=sample_rate)
+            if np.linalg.norm(features) < 1e-10:
+                continue
+
+            # 5. Store ground truth
+            gt_params = np.array([random_values[n] for n in param_names], dtype=np.float32)
+
+            store.log_run(
+                run_id=run_id,
+                target_features=features,
+                best_params=gt_params,
+                param_names=param_names,
+                best_loss=0.0,
+                total_trials=0,
+                ground_truth_params=gt_params,
+                probe_mode="single",
+                generation_mode="random",
+                midi_config_json=json.dumps({
+                    "note": midi_config.note,
+                    "velocity": midi_config.velocity,
+                    "sustain": midi_config.sustain_seconds,
+                    "release": midi_config.release_seconds,
+                }),
+            )
+            generated += 1
+
+        except Exception:
+            logger.exception(f"Error generating patch {i}")
+            continue
+
+        if progress_callback is not None:
+            progress_callback(i + 1, count)
+
+    return generated
+
+
+def generate_with_optimization(
+    surge_plugin_path: str | Path,
+    store: ExperienceStore,
+    count: int = 50,
+    *,
+    trials_per_run: int = 200,
+    sample_rate: int = 44100,
+    seed: int = 42,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> int:
+    """Generate training data with CMA-ES optimization for richer trial-level data.
+
+    Slower than render-only (~3-5 min per patch) but produces intermediate
+    (params, loss) pairs from each of the ~N trials.
+
+    Args:
+        surge_plugin_path: Path to Surge XT VST3.
+        store: ExperienceStore to write data to.
+        count: Number of random patches to generate and optimize.
+        trials_per_run: CMA-ES trials per optimization run.
+        sample_rate: Audio sample rate.
+        seed: Random seed.
+        progress_callback: Called with (completed, total) after each patch.
+
+    Returns:
+        Number of patches successfully generated.
+    """
+    from synth2surge.audio.engine import PluginHost
+    from synth2surge.config import OptimizationConfig
+    from synth2surge.optimizer.loop import optimize
+
+    host = PluginHost(surge_plugin_path, sample_rate=sample_rate)
+    param_names = sorted(host.parameter_names())
+    rng = random.Random(seed)
+    np_rng = np.random.RandomState(seed)
+
+    # Use reduced trials for data generation
+    trials_per_tier = trials_per_run // 3
+    config = OptimizationConfig(
+        n_trials_tier1=trials_per_tier,
+        n_trials_tier2=trials_per_tier,
+        n_trials_tier3=trials_per_run - 2 * trials_per_tier,
+    )
+
+    generated = 0
+    for i in range(count):
+        run_id = store.new_run_id()
+        try:
+            # 1. Randomize parameters — this is the "target" preset
+            random_values = {name: float(np_rng.uniform(0.0, 1.0)) for name in param_names}
+            host.set_raw_values(random_values)
+            host.reset()
+
+            # 2. Render target audio
+            midi_config = _random_midi_config(rng)
+            target_audio = host.render_midi_mono(midi_config=midi_config)
+
+            rms = float(np.sqrt(np.mean(target_audio**2)))
+            if rms < 1e-6:
+                continue
+
+            features = extract_features(target_audio, sr=sample_rate)
+            if np.linalg.norm(features) < 1e-10:
+                continue
+
+            gt_params = np.array([random_values[n] for n in param_names], dtype=np.float32)
+
+            # 3. Reset host to default and run optimization to recover params
+            host.set_raw_values({n: 0.5 for n in param_names})
+            host.reset()
+
+            result = optimize(
+                target_audio=target_audio,
+                surge_host=host,
+                config=config,
+                midi_config=midi_config,
+                experience_store=store,
+                _run_id=run_id,
+            )
+
+            # 4. Log the run with ground truth
+            store.log_run(
+                run_id=run_id,
+                target_features=features,
+                best_params=np.array(
+                    [host.get_raw_values().get(n, 0.5) for n in param_names], dtype=np.float32
+                ),
+                param_names=param_names,
+                best_loss=result.best_loss,
+                total_trials=result.total_trials,
+                ground_truth_params=gt_params,
+                probe_mode="single",
+                generation_mode="optimize",
+                midi_config_json=json.dumps({
+                    "note": midi_config.note,
+                    "velocity": midi_config.velocity,
+                    "sustain": midi_config.sustain_seconds,
+                    "release": midi_config.release_seconds,
+                }),
+            )
+            generated += 1
+
+        except Exception:
+            logger.exception(f"Error generating/optimizing patch {i}")
+            continue
+
+        if progress_callback is not None:
+            progress_callback(i + 1, count)
+
+    return generated
+
+
+def generate_from_factory(
+    surge_plugin_path: str | Path,
+    store: ExperienceStore,
+    factory_dir: str | Path | None = None,
+    max_patches: int = 50,
+    *,
+    sample_rate: int = 44100,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> int:
+    """Generate training data from Surge XT factory presets.
+
+    Uses known factory presets as ground truth — these are real,
+    musically useful patches (not random noise).
+
+    Args:
+        surge_plugin_path: Path to Surge XT VST3.
+        store: ExperienceStore to write data to.
+        factory_dir: Path to factory patches directory.
+        max_patches: Max number of factory patches to process.
+        sample_rate: Audio sample rate.
+        progress_callback: Called with (completed, total).
+
+    Returns:
+        Number of patches successfully generated.
+    """
+    from synth2surge.audio.engine import PluginHost
+    from synth2surge.config import SurgeConfig
+    from synth2surge.surge.factory import discover_factory_patches
+
+    if factory_dir is None:
+        factory_dir = SurgeConfig().factory_patches_dir
+
+    patches = discover_factory_patches(Path(factory_dir))[:max_patches]
+    if not patches:
+        logger.warning(f"No factory patches found in {factory_dir}")
+        return 0
+
+    host = PluginHost(surge_plugin_path, sample_rate=sample_rate)
+    param_names = sorted(host.parameter_names())
+
+    generated = 0
+    for i, patch_path in enumerate(patches):
+        run_id = store.new_run_id()
+        try:
+            from synth2surge.surge.preset_loader import load_fxp_into_host
+
+            load_fxp_into_host(patch_path, host)
+            host.reset()
+
+            # Record ground truth params
+            raw_values = host.get_raw_values()
+            gt_params = np.array([raw_values.get(n, 0.0) for n in param_names], dtype=np.float32)
+
+            # Render and extract features
+            audio = host.render_midi_mono()
+            rms = float(np.sqrt(np.mean(audio**2)))
+            if rms < 1e-6:
+                continue
+
+            features = extract_features(audio, sr=sample_rate)
+            if np.linalg.norm(features) < 1e-10:
+                continue
+
+            store.log_run(
+                run_id=run_id,
+                target_features=features,
+                best_params=gt_params,
+                param_names=param_names,
+                best_loss=0.0,
+                total_trials=0,
+                ground_truth_params=gt_params,
+                probe_mode="single",
+                generation_mode="factory",
+                midi_config_json=json.dumps({"preset": str(patch_path)}),
+            )
+            generated += 1
+
+        except Exception:
+            logger.exception(f"Error processing factory patch {patch_path.name}")
+            continue
+
+        if progress_callback is not None:
+            progress_callback(i + 1, len(patches))
+
+    return generated

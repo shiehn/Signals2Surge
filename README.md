@@ -192,6 +192,78 @@ synth2surge serve --host 127.0.0.1 --port 8000
 | `POST` | `/jobs/{job_id}/cancel` | Cancel a running job |
 | `GET` | `/prior/status` | Check if FAISS prior index is built |
 
+## ML Training (Self-Improving Mode)
+
+Synth2Surge includes a self-improving ML system that learns from its own optimization runs. The system generates its own training data by randomizing Surge XT parameters, rendering audio, and learning to predict parameters from audio features.
+
+### Quick start
+
+```bash
+# Install PyTorch for ML features
+uv pip install torch
+
+# Generate training data (runs unattended, ~2s per patch)
+synth2surge data generate --mode render-only --count 1000
+
+# Train the parameter predictor
+synth2surge train run
+
+# Use ML-predicted warm-start for faster optimization
+synth2surge optimize --target ./workspace/target_audio.wav --warm-start
+
+# Check training status
+synth2surge train status
+synth2surge data status
+```
+
+### Autonomous training loop
+
+Run the full self-improvement cycle unattended:
+
+```bash
+synth2surge train loop --cycles 10 --patches-per-cycle 200
+```
+
+Each cycle: generates random patches, renders audio, trains the predictor on all accumulated data, and reports improvement metrics.
+
+### How training works
+
+```
+┌─────────────────────────────────────────────────┐
+│         AUTONOMOUS SELF-IMPROVEMENT LOOP         │
+│                                                   │
+│  1. Randomize Surge XT params (uniform [0,1])    │
+│  2. Render audio with semi-random MIDI           │
+│  3. Extract audio features (512-dim)             │
+│  4. Store (features, params) as ground truth     │
+│  5. Train neural net: features → params          │
+│  6. Use predictions to warm-start CMA-ES         │
+│  7. Better optimization → better training data   │
+│  8. Repeat                                       │
+└─────────────────────────────────────────────────┘
+```
+
+The predictor maps audio features to synth parameters — at inference time, a user provides only an audio file and gets a Surge XT preset back. No MIDI information is needed at inference.
+
+### Data generation modes
+
+| Mode | Command | Speed | Description |
+|---|---|---|---|
+| Render-only | `--mode render-only` | ~2s/patch | Randomize params, render, store. No optimization. |
+| Optimize | `--mode optimize` | ~5min/patch | Also runs CMA-ES for richer trial-level data |
+| Factory | `--mode factory` | ~2s/patch | Uses factory presets as ground truth |
+
+### Training vs Using
+
+| | **Using** (matching sounds) | **Training** (improving the ML) |
+|---|---|---|
+| **What** | Match a specific target audio to Surge XT | Teach the model to predict better starting params |
+| **When** | You have audio you want to recreate | You want faster/better optimization results |
+| **Command** | `synth2surge optimize --target audio.wav` | `synth2surge train loop` |
+| **Needs Surge XT** | Yes | Yes |
+| **Needs PyTorch** | Only with `--warm-start` | Yes |
+| **Runs unattended** | No (produces results for you) | Yes (fully autonomous) |
+
 ## Testing
 
 The project has **140 tests** across 4 levels, achieving **84% code coverage**.
@@ -265,7 +337,18 @@ src/synth2surge/
 │   └── renderer.py         #   High-level render pipeline
 ├── loss/                   # Objective function
 │   ├── mr_stft.py          #   Multi-Resolution STFT loss (spectral convergence + log-magnitude)
-│   └── features.py         #   512-dim mel feature vectors for FAISS indexing
+│   ├── enriched.py         #   Enriched loss: MR-STFT + MFCC + envelope + centroid + flux
+│   └── features.py         #   512-dim mel feature vectors (+ learned 128-dim encoder features)
+├── ml/                     # Machine learning subsystem (optional, requires PyTorch)
+│   ├── experience_store.py #   SQLite store for optimization runs and trials
+│   ├── data_generator.py   #   Autonomous self-play data generation
+│   ├── predictor.py        #   FeatureMLP and SpectrogramCNN models (audio → params)
+│   ├── trainer.py          #   Training loop with tier-weighted MSE loss
+│   ├── warm_start.py       #   CMA-ES warm-start from ML predictions
+│   ├── encoder.py          #   Audio encoder CNN for learned similarity (128-dim embeddings)
+│   ├── hybrid_loss.py      #   Hybrid loss: enriched MR-STFT + learned audio similarity
+│   ├── triplet_dataset.py  #   Triplet mining from trial data for encoder training
+│   └── training_loop.py    #   Autonomous generate→train→evaluate loop
 ├── surge/                  # Surge XT patch management
 │   ├── patch.py            #   XML/FXP parser, writer, mutator (handles all 637 factory patches)
 │   ├── parameter_space.py  #   Parameter definitions, bounds, 3-tier classification
@@ -283,9 +366,9 @@ src/synth2surge/
 │   ├── routes.py           #   Endpoints with background job management
 │   └── schemas.py          #   Pydantic request/response models
 ├── cli/                    # Command-line interface
-│   └── main.py             #   Typer CLI (capture, optimize, build-prior, inspect, serve)
-├── config.py               #   Pydantic settings (audio, MIDI, loss, paths, optimization)
-└── types.py                #   Shared dataclasses (CaptureResult, RenderResult, etc.)
+│   └── main.py             #   Typer CLI (capture, optimize, build-prior, inspect, serve, data, train)
+├── config.py               #   Pydantic settings (audio, MIDI, loss, ML, paths, optimization)
+└── types.py                #   Shared dataclasses (CaptureResult, RenderResult, MLPrediction, etc.)
 ```
 
 ### Key design decisions
@@ -307,7 +390,7 @@ Before optimization, the system can query a pre-built FAISS index of Surge XT fa
 | Package | Purpose |
 |---|---|
 | `pedalboard` | VST3/AU plugin hosting, MIDI rendering, parameter access |
-| `librosa` | STFT computation, mel spectrograms |
+| `librosa` | STFT computation, mel spectrograms, MFCC, spectral features |
 | `numpy` | Numerical operations |
 | `soundfile` | WAV file I/O |
 | `optuna` | CMA-ES optimization framework |
@@ -317,6 +400,7 @@ Before optimization, the system can query a pre-built FAISS index of Surge XT fa
 | `fastapi` / `uvicorn` | REST API server |
 | `typer` / `rich` | CLI framework with progress bars |
 | `pydantic` / `pydantic-settings` | Configuration and API schema validation |
+| `torch` *(optional)* | ML models for parameter prediction and learned audio similarity |
 
 ## License
 
