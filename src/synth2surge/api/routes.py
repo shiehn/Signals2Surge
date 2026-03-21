@@ -196,6 +196,7 @@ def _run_optimize(job_id: str, req: OptimizeRequest) -> None:
             "best_loss": result.best_loss,
             "best_audio_path": str(result.best_audio_path),
             "total_trials": result.total_trials,
+            "fxp_path": str(result.fxp_path) if result.fxp_path else None,
         }
     except Exception as e:
         _jobs[job_id]["status"] = "failed"

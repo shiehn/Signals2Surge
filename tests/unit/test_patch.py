@@ -1,10 +1,11 @@
 """Unit tests for Surge XT patch parsing, mutation, and serialization."""
 
+import struct
 from pathlib import Path
 
 import pytest
 
-from synth2surge.surge.patch import SurgePatch
+from synth2surge.surge.patch import SurgePatch, extract_xml_from_bytes
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures" / "patches"
 
@@ -162,3 +163,46 @@ class TestParameterTypes:
         assert len(types) >= 500
         assert types["a_osc1_type"] == "0"  # int
         assert types["a_pitch"] == "2"  # float
+
+
+class TestVST3StateBytes:
+    """Tests for from_state_bytes with synthetic VST3 format input."""
+
+    def test_from_state_bytes_vst3_envelope(self):
+        """from_state_bytes should extract XML from a VST3 envelope."""
+        xml = (
+            b'<?xml version="1.0" encoding="UTF-8"?>'
+            b'<patch revision="1"><parameters>'
+            b'<a_pitch type="2" value="0.00000000000000"/>'
+            b'</parameters></patch>'
+        )
+        # Build a synthetic VST3 envelope:
+        # bytes 0-3: "VST3"
+        # bytes 4-39: padding
+        # bytes 40-47: chunk_list_offset (little-endian u64)
+        # bytes 48+: component data containing XML
+        component_data = b"\x00" * 10 + xml + b"\x00" * 10
+        chunk_list_offset = 48 + len(component_data)
+        header = b"VST3" + b"\x00" * 36 + struct.pack("<Q", chunk_list_offset)
+        vst3_data = header + component_data
+
+        patch = SurgePatch.from_state_bytes(vst3_data)
+        params = patch.get_all_parameters()
+        assert "a_pitch" in params
+
+    def test_extract_xml_from_vst3_bounds_check(self):
+        """extract_xml_from_bytes should handle truncated VST3 safely."""
+        xml = (
+            b'<?xml version="1.0"?>'
+            b'<patch><parameters>'
+            b'<x type="2" value="1.0"/>'
+            b'</parameters></patch>'
+        )
+        component_data = xml
+        # Set chunk_list_offset beyond actual data length
+        chunk_list_offset = 48 + len(component_data) + 9999
+        header = b"VST3" + b"\x00" * 36 + struct.pack("<Q", chunk_list_offset)
+        vst3_data = header + component_data
+
+        result = extract_xml_from_bytes(vst3_data)
+        assert b"<patch>" in result

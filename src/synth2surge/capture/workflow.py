@@ -6,6 +6,7 @@ selection, extracting state, and rendering target audio.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -17,35 +18,36 @@ from synth2surge.config import AudioConfig, MidiProbeConfig, MultiProbeConfig
 from synth2surge.types import CaptureResult
 
 
-def capture_headless(
-    plugin_path: str | Path,
-    output_dir: str | Path,
-    state_data: bytes | None = None,
+def _activate_macos_app() -> None:
+    """Register the Python process as a foreground macOS GUI application.
+
+    Without this, the native window chrome (close/minimize/maximize buttons)
+    does not respond to clicks when running from a terminal.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        from AppKit import NSApp, NSApplication, NSApplicationActivationPolicyRegular
+
+        NSApplication.sharedApplication()
+        NSApp.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+        NSApp.activateIgnoringOtherApps_(True)
+    except ImportError:
+        pass
+
+
+def _render_and_save(
+    host: PluginHost,
+    output_dir: Path,
     midi_config: MidiProbeConfig | None = None,
-    sample_rate: int | None = None,
     multi_probe_config: MultiProbeConfig | None = None,
 ) -> CaptureResult:
-    """Capture a preset without GUI — uses current or provided state.
+    """Render audio from a loaded plugin host and save results.
 
-    Args:
-        plugin_path: Path to VST3/AU plugin.
-        output_dir: Directory to save target_audio.wav and target_state.bin.
-        state_data: Optional preset state bytes to load before rendering.
-        midi_config: MIDI probe configuration.
-        sample_rate: Audio sample rate.
-        multi_probe_config: Optional multi-probe config for thorough/full capture.
-
-    Returns:
-        CaptureResult with paths to saved files and audio data.
+    This is the shared implementation used by all capture entry points.
+    It operates on the provided host directly — no new plugin instance is created.
     """
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    sr = sample_rate or AudioConfig().sample_rate
-    host = PluginHost(plugin_path, sample_rate=sr)
-
-    if state_data is not None:
-        host.set_state(state_data)
+    sr = host.sample_rate
 
     # Extract state
     state = host.get_state()
@@ -85,6 +87,44 @@ def capture_headless(
     )
 
 
+def capture_headless(
+    plugin_path: str | Path,
+    output_dir: str | Path,
+    state_data: bytes | None = None,
+    midi_config: MidiProbeConfig | None = None,
+    sample_rate: int | None = None,
+    multi_probe_config: MultiProbeConfig | None = None,
+) -> CaptureResult:
+    """Capture a preset without GUI — uses current or provided state.
+
+    Args:
+        plugin_path: Path to VST3/AU plugin.
+        output_dir: Directory to save target_audio.wav and target_state.bin.
+        state_data: Optional preset state bytes to load before rendering.
+        midi_config: MIDI probe configuration.
+        sample_rate: Audio sample rate.
+        multi_probe_config: Optional multi-probe config for thorough/full capture.
+
+    Returns:
+        CaptureResult with paths to saved files and audio data.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    sr = sample_rate or AudioConfig().sample_rate
+    host = PluginHost(plugin_path, sample_rate=sr)
+
+    if state_data is not None:
+        host.set_state(state_data)
+
+    return _render_and_save(
+        host=host,
+        output_dir=output_dir,
+        midi_config=midi_config,
+        multi_probe_config=multi_probe_config,
+    )
+
+
 def capture_from_state_file(
     plugin_path: str | Path,
     state_file: str | Path,
@@ -105,6 +145,50 @@ def capture_from_state_file(
     )
 
 
+def capture_from_fxp(
+    plugin_path: str | Path,
+    fxp_path: str | Path,
+    output_dir: str | Path,
+    midi_config: MidiProbeConfig | None = None,
+    sample_rate: int | None = None,
+    multi_probe_config: MultiProbeConfig | None = None,
+) -> CaptureResult:
+    """Capture a preset by loading an FXP file via parameter mapping.
+
+    Uses :func:`load_fxp_into_host` to apply the FXP preset, then renders
+    audio through the existing :func:`_render_and_save` helper.
+
+    Args:
+        plugin_path: Path to VST3/AU plugin.
+        fxp_path: Path to the .fxp preset file.
+        output_dir: Directory to save target_audio.wav and target_state.bin.
+        midi_config: MIDI probe configuration.
+        sample_rate: Audio sample rate.
+        multi_probe_config: Optional multi-probe config.
+
+    Returns:
+        CaptureResult with paths to saved files and audio data.
+    """
+    from synth2surge.surge.preset_loader import load_fxp_into_host
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    sr = sample_rate or AudioConfig().sample_rate
+    host = PluginHost(plugin_path, sample_rate=sr)
+
+    result = load_fxp_into_host(Path(fxp_path), host)
+    if not result.success:
+        raise RuntimeError(f"Failed to load FXP: {result.error}")
+
+    return _render_and_save(
+        host=host,
+        output_dir=output_dir,
+        midi_config=midi_config,
+        multi_probe_config=multi_probe_config,
+    )
+
+
 def capture_with_gui(
     plugin_path: str | Path,
     output_dir: str | Path,
@@ -116,7 +200,8 @@ def capture_with_gui(
 
     Shows the plugin editor window. The user selects their desired preset
     and closes the window. After the window closes, the state is captured
-    and audio is rendered.
+    and audio is rendered from the SAME plugin instance (preserving any
+    in-memory data like wavetables or samples).
 
     WARNING: This blocks the calling thread until the editor window is closed.
     Must be called from the main thread on macOS.
@@ -127,15 +212,18 @@ def capture_with_gui(
     sr = sample_rate or AudioConfig().sample_rate
     host = PluginHost(plugin_path, sample_rate=sr)
 
+    # Activate as a foreground macOS app so native window buttons work
+    _activate_macos_app()
+
     # Show the plugin's native GUI — blocks until user closes window
     host._plugin.show_editor()
 
-    # After editor closes, capture the state
-    return capture_headless(
-        plugin_path=plugin_path,
+    # Render from the SAME host instance that had the editor open.
+    # This preserves wavetables, samples, and other in-memory state that
+    # may not survive a preset_data round-trip to a new plugin instance.
+    return _render_and_save(
+        host=host,
         output_dir=output_dir,
-        state_data=host.get_state(),
         midi_config=midi_config,
-        sample_rate=sr,
         multi_probe_config=multi_probe_config,
     )
