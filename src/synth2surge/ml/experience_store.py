@@ -218,7 +218,7 @@ class ExperienceStore:
 
         rows = self._conn.execute(query, values).fetchall()
         if not rows:
-            return np.empty((0, 512), dtype=np.float32), np.empty((0, 0), dtype=np.float32), []
+            return np.empty((0, 0), dtype=np.float32), np.empty((0, 0), dtype=np.float32), []
 
         features_list = []
         params_list = []
@@ -250,7 +250,7 @@ class ExperienceStore:
         ).fetchall()
 
         if not rows:
-            return np.empty((0, 512), dtype=np.float32), np.empty((0, 0), dtype=np.float32), []
+            return np.empty((0, 0), dtype=np.float32), np.empty((0, 0), dtype=np.float32), []
 
         features_list = []
         params_list = []

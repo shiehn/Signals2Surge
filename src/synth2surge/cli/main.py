@@ -165,11 +165,23 @@ def optimize(
                 store_path=db_path,
                 models_dir=db_path.parent / "models",
             )
-            # Get predictions from the model using target audio features
+            # Extract features from target audio for warm-start prediction
+            # Use single-probe features (512-dim) from the target WAV,
+            # then pad to 3072-dim if the model expects multi-probe input
             from synth2surge.loss.features import extract_features
 
             target_features = extract_features(target_audio, sr=sr)
-            x0, sigma0 = warm_starter.predict(target_features)
+
+            # Pad 512-dim to 3072-dim (replicate across all 6 probe slots)
+            padded = np.tile(target_features, 6)
+            norm = np.linalg.norm(padded)
+            if norm > 1e-10:
+                padded /= norm
+
+            x0, sigma0 = warm_starter.predict(padded)
+            if x0 is None:
+                # Fall back to raw 512-dim in case model is old format
+                x0, sigma0 = warm_starter.predict(target_features)
             if x0 is not None:
                 console.print(
                     f"[green]ML warm-start active:[/green] predicting {len(x0)} params, "

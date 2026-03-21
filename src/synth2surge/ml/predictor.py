@@ -28,23 +28,24 @@ class FeatureMLP(nn.Module):
     """MLP that maps audio features → synth parameters.
 
     At inference, the user provides only an audio file — no MIDI info.
-    The model learns timbral characteristics from audio features alone,
-    invariant to the specific MIDI used during training data generation.
+    The model learns timbral characteristics from standardized multi-probe
+    audio features (6 probes x 512 = 3072 dims by default).
 
-    Input: 512-dim audio feature vector (mel-spectrogram statistics).
+    Input: feature_dim audio feature vector.
     Output: N-dim parameter vector in [0,1] via Sigmoid.
     """
 
-    def __init__(self, n_params: int) -> None:
+    def __init__(self, n_params: int, feature_dim: int = 3072) -> None:
         _check_torch()
         super().__init__()
+        self.feature_dim = feature_dim
 
         self.net = nn.Sequential(
-            nn.Linear(512, 512),
-            nn.LayerNorm(512),
+            nn.Linear(feature_dim, 1024),
+            nn.LayerNorm(1024),
             nn.GELU(),
             nn.Dropout(0.1),
-            nn.Linear(512, 512),
+            nn.Linear(1024, 512),
             nn.LayerNorm(512),
             nn.GELU(),
             nn.Dropout(0.1),
@@ -56,7 +57,7 @@ class FeatureMLP(nn.Module):
         """Forward pass.
 
         Args:
-            features: (batch, 512) audio features
+            features: (batch, feature_dim) audio features
 
         Returns:
             (batch, n_params) predicted parameters in [0,1]

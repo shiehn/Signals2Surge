@@ -14,10 +14,18 @@ pytestmark = pytest.mark.skipif(not TORCH_AVAILABLE, reason="PyTorch not install
 
 @pytest.mark.unit
 class TestFeatureMLP:
-    def test_forward_shape(self):
+    def test_forward_shape_3072(self):
         from synth2surge.ml.predictor import FeatureMLP
 
-        model = FeatureMLP(n_params=280)
+        model = FeatureMLP(n_params=280, feature_dim=3072)
+        x = torch.randn(4, 3072)
+        out = model(x)
+        assert out.shape == (4, 280)
+
+    def test_forward_shape_512(self):
+        from synth2surge.ml.predictor import FeatureMLP
+
+        model = FeatureMLP(n_params=280, feature_dim=512)
         x = torch.randn(4, 512)
         out = model(x)
         assert out.shape == (4, 280)
@@ -26,7 +34,7 @@ class TestFeatureMLP:
         from synth2surge.ml.predictor import FeatureMLP
 
         model = FeatureMLP(n_params=100)
-        x = torch.randn(8, 512)
+        x = torch.randn(8, 3072)
         out = model(x)
         assert out.min() >= 0.0
         assert out.max() <= 1.0
@@ -35,7 +43,7 @@ class TestFeatureMLP:
         from synth2surge.ml.predictor import FeatureMLP
 
         model = FeatureMLP(n_params=50)
-        x = torch.randn(1, 512)
+        x = torch.randn(1, 3072)
         out = model(x)
         assert out.shape == (1, 50)
 
@@ -43,7 +51,7 @@ class TestFeatureMLP:
         from synth2surge.ml.predictor import FeatureMLP
 
         model = FeatureMLP(n_params=50)
-        x = torch.randn(4, 512)
+        x = torch.randn(4, 3072)
         target = torch.rand(4, 50)
         loss = ((model(x) - target) ** 2).mean()
         loss.backward()

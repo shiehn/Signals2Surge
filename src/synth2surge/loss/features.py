@@ -64,6 +64,15 @@ def extract_features(
     return features
 
 
+def get_feature_dim(multi_probe: bool = False) -> int:
+    """Return the expected feature dimension for the current mode."""
+    if multi_probe:
+        from synth2surge.audio.standard_probes import STANDARD_FEATURE_DIM
+
+        return STANDARD_FEATURE_DIM
+    return 512
+
+
 def extract_features_learned(
     audio: np.ndarray,
     encoder: object,

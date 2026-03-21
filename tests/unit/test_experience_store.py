@@ -18,8 +18,8 @@ def param_names():
     return [f"param_{i}" for i in range(10)]
 
 
-def _fake_features():
-    return np.random.randn(512).astype(np.float32)
+def _fake_features(dim=3072):
+    return np.random.randn(dim).astype(np.float32)
 
 
 def _fake_params(n=10):
@@ -99,7 +99,7 @@ class TestExperienceStore:
             )
 
         features, params, names = store.get_training_data()
-        assert features.shape == (5, 512)
+        assert features.shape == (5, 3072)
         assert params.shape == (5, len(param_names))
         assert names == param_names
 
@@ -172,7 +172,7 @@ class TestExperienceStore:
 
     def test_empty_training_data(self, store):
         features, params, names = store.get_training_data()
-        assert features.shape == (0, 512)
+        assert features.shape[0] == 0
         assert len(names) == 0
 
     def test_get_nonexistent_run(self, store):

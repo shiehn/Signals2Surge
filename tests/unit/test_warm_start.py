@@ -47,11 +47,12 @@ class TestWarmStarter:
         checkpoint_dir = models_dir / "predictor_v1"
         checkpoint_dir.mkdir(parents=True)
 
-        model = FeatureMLP(n_params=20)
+        model = FeatureMLP(n_params=20, feature_dim=512)
         torch.save(model.state_dict(), checkpoint_dir / "model.pt")
         (checkpoint_dir / "config.json").write_text(json.dumps({
             "architecture": "FeatureMLP",
             "n_params": 20,
+            "feature_dim": 512,
             "param_names": param_names,
         }))
 
@@ -84,11 +85,12 @@ class TestWarmStarter:
         checkpoint_dir = models_dir / "predictor_v1"
         checkpoint_dir.mkdir(parents=True)
 
-        model = FeatureMLP(n_params=20)
+        model = FeatureMLP(n_params=20, feature_dim=512)
         torch.save(model.state_dict(), checkpoint_dir / "model.pt")
         (checkpoint_dir / "config.json").write_text(json.dumps({
             "architecture": "FeatureMLP",
             "n_params": 20,
+            "feature_dim": 512,
             "param_names": param_names,
         }))
 

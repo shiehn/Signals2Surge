@@ -18,6 +18,7 @@ from typing import Callable
 
 import numpy as np
 
+from synth2surge.audio.standard_probes import render_standard_features
 from synth2surge.config import MidiProbeConfig
 from synth2surge.loss.features import extract_features
 from synth2surge.ml.experience_store import ExperienceStore
@@ -74,7 +75,6 @@ def generate_render_only(
 
     host = PluginHost(surge_plugin_path, sample_rate=sample_rate)
     param_names = sorted(host.parameter_names())
-    rng = random.Random(seed)
     np_rng = np.random.RandomState(seed)
 
     generated = 0
@@ -86,18 +86,18 @@ def generate_render_only(
             host.set_raw_values(random_values)
             host.reset()
 
-            # 2. Generate semi-random MIDI and render
-            midi_config = _random_midi_config(rng)
-            audio = host.render_midi_mono(midi_config=midi_config)
+            # 2. Render standardized multi-probe set (6 probes)
+            features, segments = render_standard_features(host, sr=sample_rate)
 
-            # 3. Skip silent patches
-            rms = float(np.sqrt(np.mean(audio**2)))
-            if rms < 1e-6:
-                logger.debug(f"Patch {i} is silent, skipping")
+            # 3. Skip silent patches (check if any segment has audio)
+            total_rms = max(
+                float(np.sqrt(np.mean(seg**2))) for seg in segments if len(seg) > 0
+            ) if segments else 0.0
+            if total_rms < 1e-6:
+                logger.debug(f"Patch {i} is silent across all probes, skipping")
                 continue
 
-            # 4. Extract features
-            features = extract_features(audio, sr=sample_rate)
+            # 4. Skip if features are all zeros
             if np.linalg.norm(features) < 1e-10:
                 continue
 
@@ -112,14 +112,9 @@ def generate_render_only(
                 best_loss=0.0,
                 total_trials=0,
                 ground_truth_params=gt_params,
-                probe_mode="single",
+                probe_mode="thorough",
                 generation_mode="random",
-                midi_config_json=json.dumps({
-                    "note": midi_config.note,
-                    "velocity": midi_config.velocity,
-                    "sustain": midi_config.sustain_seconds,
-                    "release": midi_config.release_seconds,
-                }),
+                midi_config_json=json.dumps({"probe_mode": "thorough"}),
             )
             generated += 1
 

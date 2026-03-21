@@ -23,7 +23,7 @@ class TestPackageModel:
         from synth2surge.ml.predictor import FeatureMLP
 
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        model = FeatureMLP(n_params=20)
+        model = FeatureMLP(n_params=20, feature_dim=512)
         torch.save(model.state_dict(), checkpoint_dir / "model.pt")
         (checkpoint_dir / "config.json").write_text(json.dumps({
             "architecture": "FeatureMLP",
@@ -66,7 +66,7 @@ class TestDownloadPretrained:
         """Helper: create a valid model zip file."""
         from synth2surge.ml.predictor import FeatureMLP
 
-        model = FeatureMLP(n_params=20)
+        model = FeatureMLP(n_params=20, feature_dim=512)
         torch.save(model.state_dict(), zip_path.parent / "_tmp_model.pt")
 
         with zipfile.ZipFile(zip_path, "w") as zf:
@@ -156,7 +156,7 @@ class TestWarmStartWithPretrained:
         pretrained_dir.mkdir(parents=True)
 
         param_names = [f"param_{i}" for i in range(20)]
-        model = FeatureMLP(n_params=20)
+        model = FeatureMLP(n_params=20, feature_dim=512)
         torch.save(model.state_dict(), pretrained_dir / "model.pt")
         (pretrained_dir / "config.json").write_text(json.dumps({
             "architecture": "FeatureMLP",

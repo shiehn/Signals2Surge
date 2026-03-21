@@ -110,7 +110,11 @@ def train_predictor(
         return None
 
     n_params = params.shape[1]
-    logger.info(f"Training on {features.shape[0]} samples, {n_params} parameters")
+    feature_dim = features.shape[1]
+    logger.info(
+        f"Training on {features.shape[0]} samples, {n_params} parameters, "
+        f"{feature_dim}-dim features"
+    )
 
     # Build tier weights
     tier_weights = _build_tier_weights(param_names)
@@ -136,7 +140,7 @@ def train_predictor(
 
     # Create model
     device = _get_device()
-    model = FeatureMLP(n_params).to(device)
+    model = FeatureMLP(n_params, feature_dim=feature_dim).to(device)
     tier_weights_tensor = tier_weights_tensor.to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -204,6 +208,7 @@ def train_predictor(
     config_path.write_text(json.dumps({
         "architecture": "FeatureMLP",
         "n_params": n_params,
+        "feature_dim": feature_dim,
         "n_training_samples": n_total,
         "best_val_loss": best_val_loss,
         "param_names": param_names,

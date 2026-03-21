@@ -98,7 +98,8 @@ class WarmStarter:
         self._param_names = config["param_names"]
         n_params = config["n_params"]
 
-        self._model = FeatureMLP(n_params)
+        feature_dim = config.get("feature_dim", 512)
+        self._model = FeatureMLP(n_params, feature_dim=feature_dim)
         state = torch.load(model_path, map_location="cpu", weights_only=True)
         self._model.load_state_dict(state)
         self._model.eval()
