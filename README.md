@@ -95,12 +95,12 @@ pytest tests/unit/
 
 Here's a complete walkthrough you can run right now. Requires Surge XT installed.
 
-### Option A: Use a pretrained model (fastest)
+### Download the pretrained model
 
-If a pretrained model is available as a [GitHub release](https://github.com/shiehn/signals-to-surge/releases):
+A pretrained model (trained on 966 Surge XT patches) is available as a [GitHub release](https://github.com/shiehn/Signals2Surge/releases). This is the fastest way to get started:
 
 ```bash
-# Download the pretrained model (~1 MB)
+# Download the pretrained model (~3 MB)
 synth2surge train download
 
 # Capture audio from any synth
@@ -110,11 +110,11 @@ synth2surge capture --plugin "/Library/Audio/Plug-Ins/VST3/Surge XT.vst3" --no-g
 synth2surge optimize --target ./workspace/target_audio.wav --warm-start
 ```
 
-That's it — the pretrained model provides initial parameter predictions, then CMA-ES refines them.
+That's it — the pretrained model predicts initial parameters for all 775 Surge XT params, then CMA-ES refines from that starting point.
 
-### Option B: Train your own model
+### Or: Train your own model
 
-If no pretrained model is available, or you want to train from scratch:
+If you want to train from scratch or improve on the pretrained model:
 
 ### 1. Generate a small training dataset
 
@@ -374,17 +374,17 @@ Each cycle automatically:
 
 ### Using a pretrained model
 
-Instead of training from scratch, you can download a pretrained model:
+A pretrained model trained on 966 Surge XT patches is available at [v0.2.0](https://github.com/shiehn/Signals2Surge/releases/tag/v0.2.0):
 
 ```bash
 # Download from the latest GitHub release
 synth2surge train download
 
-# Or from a specific URL
-synth2surge train download --url https://example.com/pretrained-model.zip
-
 # Verify it's installed
 synth2surge train status
+
+# Use it
+synth2surge optimize --target audio.wav --warm-start
 ```
 
 The pretrained model is stored at `workspace/models/predictor_pretrained/`. When you run `--warm-start`, the system uses your own trained model if available, otherwise falls back to the pretrained model.
