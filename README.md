@@ -33,7 +33,7 @@ Target Audio (WAV)                 Surge XT
           │  compare audio         │  1. Suggest params     │
           │  (MR-STFT loss)        │  2. Render candidate   │
           │                        │  3. Compute loss       │
-          │                        │  4. Repeat 800 trials  │
+          │                        │  4. Repeat 100 trials  │
           │                        └─────────┬─────────────┘
           │                                  │
           │                        ┌─────────▼─────────────┐
@@ -52,7 +52,7 @@ Target Audio (WAV)                 Surge XT
 │  ─────────────────────────           ────────────────────────    │
 │                                                                   │
 │  1. Randomize Surge params           1. User provides audio      │
-│  2. Render audio (random MIDI)       2. Extract 512-dim features │
+│  2. Render audio (random MIDI)       2. Extract 3072-dim features│
 │  3. Store (features, params)         3. ML predicts initial      │
 │     as ground truth                     params (warm-start)      │
 │  4. Train neural net on              4. CMA-ES refines from      │
@@ -114,7 +114,7 @@ synth2surge capture --plugin "/Library/Audio/Plug-Ins/VST3/Surge XT.vst3" --no-g
 synth2surge optimize --target ./workspace/target_audio.wav --warm-start
 ```
 
-That's it — the pretrained model predicts initial parameters for all 775 Surge XT params, then CMA-ES refines from that starting point.
+That's it — the pretrained model predicts initial parameters for all Surge XT scene A params, then CMA-ES refines from that starting point.
 
 ### Or: Train your own model
 
@@ -255,7 +255,7 @@ The ML system is what makes Synth2Surge unique. It has a **closed training loop*
 
 1. **Randomize** all ~500 Surge XT parameters to uniform [0, 1]
 2. **Render** audio through Surge XT with semi-random MIDI (random notes, velocities, durations)
-3. **Extract** a 512-dimensional audio feature vector (mel-spectrogram statistics)
+3. **Extract** a 3072-dimensional audio feature vector (6 probes x 512-dim mel-spectrogram statistics)
 4. **Store** the pair `(audio_features, parameters)` — this IS the ground truth label, no human labeling needed
 5. **Train** a neural network to predict parameters from audio features
 6. **Use** the trained model to warm-start CMA-ES with a predicted initial guess
@@ -295,7 +295,7 @@ synth2surge data generate --mode render-only --count 15 --seed 300 --no-resume
 | Mode | Speed | What it stores | Best for |
 |---|---|---|---|
 | `render-only` | ~5 audible patches per 15 attempts | Ground truth `(features, params)` pairs | Bootstrapping: accumulate lots of data fast |
-| `optimize` | ~5 min per patch | Ground truth + ~200 `(params, loss)` trial rows per run | Richer training signal for the audio encoder |
+| `optimize` | ~5 min per patch | Ground truth + ~200 `(params, loss)` trial rows per run | Richer training signal with per-trial loss data |
 | `factory` | ~2s per patch | Factory preset ground truth pairs | High-quality, musically meaningful data |
 
 #### 2. Check data status
@@ -328,7 +328,7 @@ Trains a FeatureMLP predictor on all accumulated data. Saves a versioned checkpo
 synth2surge train status
 ```
 
-Shows data counts, model versions, and whether you've hit the thresholds for MLP (50 runs) or CNN (200 runs) training.
+Shows data counts, model versions, and whether you've hit the threshold for model training (50 runs).
 
 #### 5. Use the trained model
 
@@ -371,10 +371,9 @@ Each cycle automatically:
 | Training examples | What unlocks |
 |---|---|
 | 10 | Minimum to attempt training (may not be useful yet) |
-| 50 | FeatureMLP starts providing useful tier-1 warm-starts |
-| 200 | SpectrogramCNN model becomes viable with per-tier prediction heads |
-| 1,000+ | Model reliable enough to consider reducing CMA-ES trial budgets |
-| 5,000+ | Model could potentially replace CMA-ES for familiar sound categories |
+| 50 | Model starts providing useful warm-starts |
+| 1,000+ | Model reliable enough to consider reducing CMA-ES trial budgets *(aspirational — not yet automated)* |
+| 5,000+ | Model could potentially replace CMA-ES for familiar sound categories *(aspirational — not yet automated)* |
 
 ### Using a pretrained model
 
@@ -592,10 +591,10 @@ Synth2Surge is a pure Python application built on [Spotify's pedalboard](https:/
 │  │        │  (Enriched     │    │  (PyTorch, optional)  │       │  │
 │  │        │   MR-STFT)     │    │                       │       │  │
 │  │        └────────────────┘    │  Experience Store     │       │  │
-│  │                              │  Predictor (MLP/CNN)  │       │  │
+│  │                              │  Predictor (MLP)      │       │  │
 │  │  ┌──────────────────────┐    │  Warm Starter         │       │  │
-│  │  │  Plugin Host         │    │  Audio Encoder        │       │  │
-│  │  │  (pedalboard)        │    │  Hybrid Loss          │       │  │
+│  │  │  Plugin Host         │    │                       │       │  │
+│  │  │  (pedalboard)        │    │                       │       │  │
 │  │  │  Surge XT raw_value  │    └──────────────────────┘       │  │
 │  │  └──────────────────────┘                                    │  │
 │  └──────────────────────────────────────────────────────────────┘  │
@@ -609,23 +608,22 @@ src/synth2surge/
 ├── audio/                  # Plugin hosting & rendering
 │   ├── engine.py           #   PluginHost: pedalboard wrapper (load, render, state, raw_value API)
 │   ├── midi.py             #   MIDI probe generation (single/thorough/full multi-probe system)
-│   └── renderer.py         #   High-level render pipeline
+│   ├── renderer.py         #   High-level render pipeline
+│   └── standard_probes.py  #   Multi-probe constants: 6 probes x 512 = 3072-dim feature space
 │
 ├── loss/                   # Audio comparison (objective functions)
 │   ├── mr_stft.py          #   Multi-Resolution STFT loss (spectral convergence + log-magnitude)
 │   ├── enriched.py         #   Enriched loss: MR-STFT + MFCC + envelope + centroid + flux
-│   └── features.py         #   512-dim mel feature vectors (+ 128-dim learned encoder features)
+│   └── features.py         #   512-dim mel feature vectors
 │
 ├── ml/                     # Machine learning subsystem (optional, requires PyTorch)
 │   ├── experience_store.py #   SQLite store for optimization runs and trials
 │   ├── data_generator.py   #   Autonomous self-play data generation (render-only / optimize / factory)
-│   ├── predictor.py        #   FeatureMLP and SpectrogramCNN models (audio → params)
+│   ├── predictor.py        #   FeatureMLP model (audio features → synth params)
 │   ├── trainer.py          #   Training loop: tier-weighted MSE, AdamW, cosine annealing, early stopping
 │   ├── warm_start.py       #   CMA-ES warm-start from ML predictions with MC Dropout confidence
-│   ├── encoder.py          #   AudioEncoder CNN: log-mel spectrogram → 128-dim L2-normalized embedding
-│   ├── hybrid_loss.py      #   Hybrid loss: enriched MR-STFT + learned audio similarity (alpha-blended)
-│   ├── triplet_dataset.py  #   Triplet mining from optimization trial data for encoder training
-│   └── training_loop.py    #   Autonomous generate → train → evaluate loop
+│   ├── training_loop.py    #   Autonomous generate → train → evaluate loop
+│   └── pretrained.py       #   Pretrained model download and management
 │
 ├── surge/                  # Surge XT patch management
 │   ├── patch.py            #   XML/FXP parser, writer, mutator
@@ -639,7 +637,8 @@ src/synth2surge/
 │   └── index.py            #   FAISS IndexFlatIP (brute-force cosine similarity)
 │
 ├── optimizer/              # CMA-ES optimization
-│   └── loop.py             #   Multi-stage loop: 3-tier CMA-ES with parameter freezing
+│   ├── loop.py             #   Multi-stage loop: 3-tier CMA-ES with parameter freezing
+│   └── strategies.py       #   Optimization strategies
 │
 ├── capture/                # Source plugin capture
 │   └── workflow.py         #   GUI and headless capture workflows
@@ -652,7 +651,7 @@ src/synth2surge/
 ├── cli/                    # Command-line interface
 │   └── main.py             #   Typer CLI: capture, optimize, data, train, build-prior, inspect, serve
 │
-├── config.py               #   All configuration: audio, MIDI, loss, ML, enriched loss, learned loss
+├── config.py               #   All configuration: audio, MIDI, loss, ML, enriched loss
 └── types.py                #   Shared dataclasses: CaptureResult, OptimizationResult, MLPrediction
 ```
 
@@ -680,26 +679,15 @@ All components use librosa (already a dependency). Total overhead: ~5ms per eval
 
 CMA-ES works well up to ~200 dimensions. With ~500 active parameters (scene A + globals), the 3-tier staged approach optimizes the most impactful parameters first, then freezes those values and refines secondary parameters, then detail parameters. Each stage runs an independent CMA-ES sampler.
 
-#### ML parameter predictor (two architectures)
+#### ML parameter predictor
 
-**FeatureMLP** (~800K parameters, used when < 200 training examples):
+**FeatureMLP** (~3.8M parameters):
 ```
-Input: 512-dim mel-spectrogram statistics
-  → Linear(512, 512) + LayerNorm + GELU + Dropout(0.1)
-  → Linear(512, 512) + LayerNorm + GELU + Dropout(0.1)
+Input: 3072-dim multi-probe mel-spectrogram statistics (6 probes x 512)
+  → Linear(3072, 1024) + LayerNorm + GELU + Dropout(0.1)
+  → Linear(1024, 512) + LayerNorm + GELU + Dropout(0.1)
   → Linear(512, N_params) + Sigmoid
 Output: [0,1] parameter predictions for all Surge XT scene A params
-```
-
-**SpectrogramCNN** (~350K parameters, used when >= 200 training examples):
-```
-Input: Log-mel spectrogram [1, 128, T]
-  → 4-layer CNN encoder (32→64→128→256 channels, stride-2, BatchNorm, ReLU)
-  → AdaptiveAvgPool → Flatten → 256-dim embedding
-  → Per-tier prediction heads:
-      Tier 1 (structural, ~45 params): 256 → 128 → N → Sigmoid
-      Tier 2 (shaping, ~60 params):    256 → 128 → N → Sigmoid
-      Tier 3 (detail, ~175 params):    256 → 64  → N → Sigmoid
 ```
 
 Training uses **tier-weighted MSE loss** (tier 1: 3x, tier 2: 1.5x, tier 3: 1x) because getting oscillator type and filter cutoff right matters far more than modulation depth.
@@ -714,21 +702,11 @@ At inference, the model runs 10 forward passes with dropout enabled. The varianc
 | 0.3 - 0.6 | Use prediction, moderate search | 0.30 |
 | < 0.3 | **Fall back to default** (no warm-start) | 0.40 |
 
-#### Audio encoder and hybrid loss
-
-The AudioEncoder is a separate CNN that maps spectrograms to 128-dim L2-normalized embeddings. Trained via triplet margin ranking loss on optimization trial data — it learns that low-loss candidates should embed closer to the target than high-loss ones.
-
-The hybrid loss blends enriched MR-STFT with learned similarity:
-```
-hybrid = (1 - alpha) * enriched_loss + alpha * learned_distance
-```
-Alpha starts at 0 and increases to max 0.3 as the encoder validates against held-out data. The enriched MR-STFT always remains dominant to prevent adversarial gaming.
-
 #### Experience store (SQLite)
 
 All optimization runs and trials are logged to a SQLite database with numpy array BLOBs. Schema:
 
-- **`runs`** table: run_id, target_features (512-dim), best_params, ground_truth_params, best_loss, generation_mode, model_version
+- **`runs`** table: run_id, target_features (3072-dim), best_params, ground_truth_params, best_loss, generation_mode, model_version
 - **`trials`** table: run_id, stage, trial_idx, params, loss
 - **`model_versions`** table: version_id, training metrics, checkpoint path
 
@@ -749,13 +727,13 @@ This is the foundation everything else builds on — every optimization run gene
 | `typer` + `rich` | CLI framework with progress bars |
 | `pydantic` + `pydantic-settings` | Configuration and API schema validation |
 | `mido` | MIDI message handling |
-| `torch` *(optional)* | Neural networks for parameter prediction and learned audio similarity |
+| `torch` *(optional)* | Neural networks for parameter prediction |
 
 ---
 
 ## Testing
 
-232 tests across unit, integration, and end-to-end levels.
+292 tests across unit, integration, and end-to-end levels.
 
 ```bash
 # All unit tests (no plugins required, ~3 seconds)
@@ -781,9 +759,9 @@ Tests that require Surge XT are marked `@pytest.mark.requires_surge` and auto-sk
 
 | Level | What it validates |
 |---|---|
-| **Unit** (207) | Loss math, XML parsing, parameter normalization, MIDI generation, FAISS indexing, CLI args, API routes, experience store, ML models, training, warm-start |
-| **E2E synthetic** (18) | Full ML pipeline with synthetic audio: generate → train → predict → evaluate. Model predictions 30% better than random. |
-| **E2E Surge XT** (7) | Real plugin rendering, data generation, optimization, and closed-loop: generate → train → warm-start predict with actual Surge XT audio |
+| **Unit** (212) | Loss math, XML parsing, parameter normalization, MIDI generation, FAISS indexing, CLI args, API routes, experience store, ML models, training, warm-start |
+| **E2E synthetic** (15) | Full ML pipeline with synthetic audio: generate → train → predict → evaluate. Model predictions 30% better than random. |
+| **E2E Surge XT** (27) | Real plugin rendering, data generation, optimization, factory round-trips, multi-probe pipeline, and closed-loop: generate → train → warm-start predict with actual Surge XT audio |
 | **Integration** | Plugin loading, audio rendering, state round-trip, optimizer convergence |
 | **Acceptance** | Loss ranking correctness, feature similarity, self-translation quality |
 

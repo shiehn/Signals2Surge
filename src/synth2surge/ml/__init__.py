@@ -1,1 +1,1 @@
-"""Machine learning subsystem for self-improving parameter prediction and audio similarity."""
+"""Machine learning subsystem for self-improving parameter prediction."""

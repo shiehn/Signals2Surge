@@ -103,6 +103,7 @@ def optimize(
     target_segments: list[np.ndarray] | None = None,
     experience_store: object | None = None,
     _run_id: str | None = None,
+    preset_name: str = "Synth2Surge",
 ) -> OptimizationResult:
     """Run multi-stage CMA-ES optimization to match target audio.
 
@@ -276,7 +277,7 @@ def optimize(
     # Export as FXP
     from synth2surge.surge.fxp_export import state_to_fxp
 
-    fxp_path = state_to_fxp(best_state, output_dir / "best_patch.fxp")
+    fxp_path = state_to_fxp(best_state, output_dir / "best_patch.fxp", preset_name=preset_name)
 
     # Render and save best audio
     surge_host.reset()

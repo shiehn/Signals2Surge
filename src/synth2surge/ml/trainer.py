@@ -1,6 +1,6 @@
-"""Training loop for the parameter predictor.
+"""Training loop for the FeatureMLP parameter predictor.
 
-Trains FeatureMLP (or SpectrogramCNN) on accumulated experience data.
+Trains FeatureMLP on accumulated experience data.
 Supports weighted per-tier MSE loss, early stopping, and model checkpointing.
 """
 

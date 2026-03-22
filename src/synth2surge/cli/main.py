@@ -456,11 +456,8 @@ def train_status(
 
     # Data thresholds
     n = stats["total_runs"]
-    mlp_status = "[green]Yes[/green]" if n >= 50 else f"[yellow]{n}/50[/yellow]"
-    table.add_row("MLP ready (50+)", mlp_status)
-    table.add_row(
-        "CNN ready (200+)", "[green]Yes[/green]" if n >= 200 else f"[yellow]{n}/200[/yellow]"
-    )
+    model_status = "[green]Yes[/green]" if n >= 50 else f"[yellow]{n}/50[/yellow]"
+    table.add_row("Model ready (50+ runs)", model_status)
 
     console.print(table)
     store.close()
@@ -713,6 +710,334 @@ def data_status(
 
     console.print(table)
     store.close()
+
+
+@app.command()
+def queue(
+    plugin: Path = typer.Option(..., help="Path to source VST3/AU plugin"),
+    queue_dir: Path = typer.Option(
+        Path("./workspace/queue"), help="Queue directory for captured presets"
+    ),
+    probe_mode: str = typer.Option(
+        "single",
+        help="MIDI probe mode: single, thorough (6 probes), or full (14 probes)",
+    ),
+    duration: float = typer.Option(4.0, help="Render duration in seconds"),
+    note: int = typer.Option(60, help="MIDI note (60 = C4)"),
+    velocity: int = typer.Option(100, help="MIDI velocity (0-127)"),
+) -> None:
+    """Interactively queue presets from any synth for batch porting to Surge XT."""
+    from synth2surge.audio.engine import PluginHost
+    from synth2surge.batch.manifest import (
+        CATEGORIES,
+        QueueItem,
+        add_item,
+        compute_state_hash,
+        load_manifest,
+        new_item_id,
+        sanitize_filename,
+        save_manifest,
+    )
+    from synth2surge.capture.workflow import _activate_macos_app, _render_and_save
+    from synth2surge.config import AudioConfig, MidiProbeConfig, MultiProbeConfig
+
+    queue_dir = Path(queue_dir)
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = queue_dir / "manifest.json"
+    manifest = load_manifest(manifest_path)
+    manifest.plugin_path = str(plugin)
+
+    sr = AudioConfig().sample_rate
+    host = PluginHost(str(plugin), sample_rate=sr)
+
+    # Build MIDI config
+    midi_config = MidiProbeConfig(
+        note=note, velocity=velocity, duration_seconds=duration
+    )
+    multi_probe_config: MultiProbeConfig | None = None
+    if probe_mode == "thorough":
+        multi_probe_config = MultiProbeConfig.thorough()
+    elif probe_mode == "full":
+        multi_probe_config = MultiProbeConfig.full()
+
+    _activate_macos_app()
+
+    added = 0
+    skipped = 0
+
+    while True:
+        console.print(
+            "\n[bold cyan]Opening plugin editor — select a preset, "
+            "then close the window.[/bold cyan]"
+        )
+        host._plugin.show_editor()
+
+        # Capture state and check for duplicate
+        state = host.get_state()
+        state_hash = compute_state_hash(state)
+
+        # Check dedup
+        is_dup = any(
+            item.state_hash == state_hash for item in manifest.items if item.state_hash
+        )
+        if is_dup:
+            console.print(
+                "[yellow]This preset was already queued "
+                "(duplicate state). Skipping.[/yellow]"
+            )
+            skipped += 1
+        else:
+            # Render and save audio + state
+            item_id = new_item_id()
+            item_dir = queue_dir / item_id
+            item_dir.mkdir(parents=True, exist_ok=True)
+
+            _render_and_save(
+                host=host,
+                output_dir=item_dir,
+                midi_config=midi_config,
+                multi_probe_config=multi_probe_config,
+            )
+
+            # Prompt for category
+            console.print("\n[bold]Select a category:[/bold]")
+            for i, cat in enumerate(CATEGORIES, 1):
+                console.print(f"  {i}. {cat}")
+            console.print(f"  {len(CATEGORIES) + 1}. Custom")
+
+            choice = typer.prompt("Category", default="1")
+            try:
+                idx = int(choice)
+                if 1 <= idx <= len(CATEGORIES):
+                    category = CATEGORIES[idx - 1]
+                else:
+                    category = typer.prompt("Enter custom category")
+            except ValueError:
+                # They typed a string directly
+                category = choice.strip().title() if choice.strip() else "Other"
+
+            # Prompt for preset name
+            preset_name = typer.prompt("Preset name")
+
+            item = QueueItem(
+                id=item_id,
+                preset_name=preset_name,
+                category=category,
+                audio_path=f"{item_id}/target_audio.wav",
+                state_path=f"{item_id}/target_state.bin",
+                state_hash=state_hash,
+            )
+            add_item(manifest, item)
+            save_manifest(manifest, manifest_path)
+            added += 1
+
+            safe_name = sanitize_filename(preset_name)
+            console.print(
+                f"[green]Queued:[/green] {safe_name} ({category}) — "
+                f"{added} queued, {skipped} duplicates skipped"
+            )
+
+        add_another = typer.confirm("Add another preset?", default=True)
+        if not add_another:
+            break
+
+    console.print(
+        f"\n[bold green]Done![/bold green] "
+        f"{added} presets queued, {skipped} duplicates skipped."
+    )
+    console.print(f"Manifest: {manifest_path}")
+    console.print(
+        f"Run [cyan]synth2surge batch-optimize "
+        f"--queue-dir {queue_dir}[/cyan] to process them."
+    )
+
+
+@app.command("batch-optimize")
+def batch_optimize(
+    queue_dir: Optional[Path] = typer.Option(
+        None, help="Queue directory (from 'synth2surge queue')"
+    ),
+    input_dir: Optional[Path] = typer.Option(
+        None, "--input", help="WAV folder (subdirectory names = categories)"
+    ),
+    output_dir: Path = typer.Option(
+        Path("./workspace/library"), help="Output library directory"
+    ),
+    surge_plugin: Path = typer.Option(
+        Path("/Library/Audio/Plug-Ins/VST3/Surge XT.vst3"),
+        help="Path to Surge XT VST3",
+    ),
+    trials_t1: int = typer.Option(50, help="Trials for tier 1"),
+    trials_t2: int = typer.Option(30, help="Trials for tier 2"),
+    trials_t3: int = typer.Option(20, help="Trials for tier 3"),
+    stages: str = typer.Option("1,2,3", help="Stages to run (comma-separated)"),
+    probe_mode: str = typer.Option("single", help="MIDI probe mode"),
+    warm_start: bool = typer.Option(False, help="Use ML model to warm-start CMA-ES"),
+    db_path: Path = typer.Option(
+        Path("./workspace/experience.db"), help="Experience store path"
+    ),
+) -> None:
+    """Batch-optimize queued presets or a folder of WAV files into Surge XT patches."""
+    import shutil
+
+    import soundfile as sf
+
+    from synth2surge.audio.engine import PluginHost
+    from synth2surge.batch.manifest import (
+        build_manifest_from_wav_folder,
+        load_manifest,
+        mark_completed,
+        mark_failed,
+        pending_items,
+        sanitize_filename,
+        save_manifest,
+    )
+    from synth2surge.config import MidiProbeConfig, MultiProbeConfig, OptimizationConfig
+    from synth2surge.optimizer.loop import optimize
+
+    # Validate input source
+    if queue_dir is None and input_dir is None:
+        console.print("[red]Error: Provide either --queue-dir or --input[/red]")
+        raise typer.Exit(code=1)
+    if queue_dir is not None and input_dir is not None:
+        console.print("[red]Error: Provide only one of --queue-dir or --input, not both[/red]")
+        raise typer.Exit(code=1)
+
+    # Load or build manifest
+    if queue_dir is not None:
+        manifest_path = Path(queue_dir) / "manifest.json"
+        manifest = load_manifest(manifest_path)
+    else:
+        manifest = build_manifest_from_wav_folder(Path(input_dir))
+        manifest_path = None  # No persistent manifest for WAV folder mode
+
+    items = pending_items(manifest)
+    if not items:
+        console.print("[yellow]No pending items to optimize.[/yellow]")
+        raise typer.Exit()
+
+    console.print(f"[bold]Batch optimizing {len(items)} presets[/bold]")
+
+    # Parse stages
+    stage_list = [int(s.strip()) for s in stages.split(",")]
+
+    # Build configs
+    opt_config = OptimizationConfig(
+        n_trials_tier1=trials_t1,
+        n_trials_tier2=trials_t2,
+        n_trials_tier3=trials_t3,
+    )
+    midi_config = MidiProbeConfig()
+    multi_probe_config: MultiProbeConfig | None = None
+    if probe_mode == "thorough":
+        multi_probe_config = MultiProbeConfig.thorough()
+    elif probe_mode == "full":
+        multi_probe_config = MultiProbeConfig.full()
+
+    # Load Surge XT once
+    surge_host = PluginHost(str(surge_plugin))
+
+    # Optional warm-start
+    warm_starter = None
+    if warm_start:
+        from synth2surge.ml.warm_start import WarmStarter
+
+        warm_starter = WarmStarter(store_path=db_path, models_dir=Path("workspace/models"))
+
+    output_dir = Path(output_dir)
+    completed = 0
+    failed = 0
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        console=console,
+    ) as progress:
+        outer_task = progress.add_task("Batch", total=len(items))
+
+        for i, item in enumerate(items):
+            safe_name = sanitize_filename(item.preset_name)
+            progress.update(
+                outer_task,
+                description=f"[{i + 1}/{len(items)}] {item.preset_name} ({item.category})",
+            )
+
+            # Mark running
+            item.status = "running"
+            if manifest_path:
+                save_manifest(manifest, manifest_path)
+
+            try:
+                # Load target audio
+                audio_path = item.audio_path
+                if queue_dir and not Path(audio_path).is_absolute():
+                    audio_path = str(Path(queue_dir) / audio_path)
+
+                target_audio, _sr = sf.read(audio_path, dtype="float32")
+                if target_audio.ndim > 1:
+                    target_audio = target_audio.mean(axis=1)
+
+                # Create working directory for this optimization
+                work_dir = output_dir / item.category.lower() / safe_name
+                work_dir.mkdir(parents=True, exist_ok=True)
+
+                # Warm-start if available
+                if warm_starter is not None:
+                    from synth2surge.loss.features import extract_features
+
+                    features = extract_features(target_audio)
+                    x0, sigma0 = warm_starter.predict(features)
+                    if x0 is not None:
+                        for name, val in x0.items():
+                            try:
+                                surge_host.set_raw_value(name, val)
+                            except Exception:
+                                pass
+
+                result = optimize(
+                    target_audio=target_audio,
+                    surge_host=surge_host,
+                    config=opt_config,
+                    midi_config=midi_config,
+                    stages=stage_list,
+                    output_dir=work_dir,
+                    multi_probe_config=multi_probe_config,
+                    preset_name=item.preset_name,
+                )
+
+                # Copy outputs to final names
+                final_fxp = work_dir / f"{safe_name}.fxp"
+                final_wav = work_dir / f"{safe_name}.wav"
+                final_bin = work_dir / f"{safe_name}.bin"
+
+                if result.fxp_path and result.fxp_path.exists():
+                    shutil.copy2(result.fxp_path, final_fxp)
+                if result.best_audio_path and result.best_audio_path.exists():
+                    shutil.copy2(result.best_audio_path, final_wav)
+                if result.best_patch_path and result.best_patch_path.exists():
+                    shutil.copy2(result.best_patch_path, final_bin)
+
+                mark_completed(manifest, item.id, str(work_dir))
+                completed += 1
+
+            except Exception as exc:
+                mark_failed(manifest, item.id, str(exc))
+                console.print(f"[red]Failed: {item.preset_name} — {exc}[/red]")
+                failed += 1
+
+            if manifest_path:
+                save_manifest(manifest, manifest_path)
+
+            progress.advance(outer_task)
+
+    # Summary
+    console.print("\n[bold green]Batch complete![/bold green]")
+    console.print(f"  Completed: {completed}")
+    if failed:
+        console.print(f"  Failed: {failed}")
+    console.print(f"  Output: {output_dir}")
 
 
 if __name__ == "__main__":

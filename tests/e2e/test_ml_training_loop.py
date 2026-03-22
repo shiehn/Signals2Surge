@@ -258,12 +258,12 @@ class TestModelTrainingE2E:
         # Model loads back and produces valid output
         from synth2surge.ml.predictor import FeatureMLP
 
-        model = FeatureMLP(config["n_params"])
+        model = FeatureMLP(config["n_params"], feature_dim=config["feature_dim"])
         state = torch.load(checkpoint_dir / "model.pt", map_location="cpu", weights_only=True)
         model.load_state_dict(state)
         model.eval()
 
-        test_input = torch.randn(1, 512)
+        test_input = torch.randn(1, config["feature_dim"])
         with torch.no_grad():
             pred = model(test_input)
 
@@ -425,7 +425,7 @@ class TestClosedLoopE2E:
                 / "config.json"
             ).read_text()
         )
-        model = FeatureMLP(config["n_params"])
+        model = FeatureMLP(config["n_params"], feature_dim=config["feature_dim"])
         state = torch.load(
             ml_workspace["models_dir"]
             / f"predictor_{result.version_id}"
@@ -568,60 +568,6 @@ class TestEnrichedLossE2E:
         assert np.isfinite(envelope_distance(audio1, audio2))
         assert np.isfinite(centroid_distance(audio1, audio2))
         assert np.isfinite(spectral_flux_distance(audio1, audio2))
-
-
-# ---------------------------------------------------------------------------
-# Audio Encoder
-# ---------------------------------------------------------------------------
-
-
-class TestAudioEncoderE2E:
-    """Test the learned audio encoder end-to-end."""
-
-    def test_encoder_produces_normalized_embeddings(self):
-        """Encoder output should be L2-normalized."""
-        from synth2surge.ml.encoder import AudioEncoder
-
-        encoder = AudioEncoder(embed_dim=128)
-        mel = torch.randn(4, 1, 128, 344)
-
-        with torch.no_grad():
-            embeddings = encoder(mel)
-
-        assert embeddings.shape == (4, 128)
-        norms = torch.norm(embeddings, p=2, dim=-1)
-        torch.testing.assert_close(norms, torch.ones(4), atol=1e-5, rtol=1e-5)
-
-    def test_hybrid_loss_evaluator(self):
-        """HybridLossEvaluator produces consistent, finite losses."""
-        from synth2surge.ml.encoder import AudioEncoder
-        from synth2surge.ml.hybrid_loss import HybridLossEvaluator
-
-        encoder = AudioEncoder(embed_dim=128)
-        target = (0.5 * np.sin(2 * np.pi * 440 * np.linspace(0, 1, 44100))).astype(np.float32)
-
-        evaluator = HybridLossEvaluator(encoder, target, alpha=0.1)
-
-        loss_same = evaluator(target)
-        assert np.isfinite(loss_same)
-        assert loss_same < 1.0
-
-        noise = np.random.randn(44100).astype(np.float32) * 0.3
-        loss_diff = evaluator(noise)
-        assert np.isfinite(loss_diff)
-        assert loss_diff > loss_same
-
-    def test_learned_features_extraction(self):
-        """extract_features_learned produces valid embeddings."""
-        from synth2surge.loss.features import extract_features_learned
-        from synth2surge.ml.encoder import AudioEncoder
-
-        encoder = AudioEncoder(embed_dim=128)
-        audio = (0.5 * np.sin(2 * np.pi * 440 * np.linspace(0, 1, 44100))).astype(np.float32)
-
-        features = extract_features_learned(audio, encoder)
-        assert features.shape == (128,)
-        assert abs(np.linalg.norm(features) - 1.0) < 0.01
 
 
 # ---------------------------------------------------------------------------
