@@ -25,6 +25,32 @@ from synth2surge.ml.experience_store import ExperienceStore
 
 logger = logging.getLogger(__name__)
 
+# Parameters that crash Surge XT when randomized (SIGSEGV).
+# Identified by binary search: trigger_mode and play_mode params cause
+# crashes when set to arbitrary values.  FX type params (fx_*_fx_type)
+# also crash because each FX type expects specific param semantics.
+_CRASH_PATTERNS = ("trigger_mode", "play_mode")
+
+
+def _safe_param_names(all_names: list[str]) -> list[str]:
+    """Filter parameter names to only those safe to randomize.
+
+    Excludes:
+    - Scene B params (b_*) — we only use scene A
+    - FX / global params (fx_*, active_scene, bypass, etc.) — FX type randomization crashes
+    - trigger_mode, play_mode — crash Surge XT with arbitrary values
+    """
+    safe = []
+    for name in all_names:
+        # Only scene A params
+        if not name.startswith("a_"):
+            continue
+        # Skip params known to crash
+        if any(pattern in name for pattern in _CRASH_PATTERNS):
+            continue
+        safe.append(name)
+    return safe
+
 
 def _random_midi_config(rng: random.Random) -> MidiProbeConfig:
     """Generate a semi-random MIDI probe configuration."""
@@ -74,15 +100,24 @@ def generate_render_only(
         seed += existing
 
     host = PluginHost(surge_plugin_path, sample_rate=sample_rate)
-    param_names = sorted(host.parameter_names())
+    all_param_names = sorted(host.parameter_names())
+    safe_names = _safe_param_names(all_param_names)
+    default_values = host.get_raw_values()
     np_rng = np.random.RandomState(seed)
+    logger.info(
+        f"Randomizing {len(safe_names)}/{len(all_param_names)} safe params "
+        f"(skipping {len(all_param_names) - len(safe_names)} scene-B/control params)"
+    )
 
     generated = 0
     for i in range(count):
         run_id = store.new_run_id()
         try:
-            # 1. Randomize all parameters
-            random_values = {name: float(np_rng.uniform(0.0, 1.0)) for name in param_names}
+            # 1. Randomize only safe parameters (scene A + safe globals)
+            random_values = {name: float(np_rng.uniform(0.0, 1.0)) for name in safe_names}
+            # Build full param vector: random for safe params, defaults for the rest
+            full_values = {n: random_values.get(n, default_values.get(n, 0.5))
+                           for n in all_param_names}
             host.set_raw_values(random_values)
             host.reset()
 
@@ -101,14 +136,14 @@ def generate_render_only(
             if np.linalg.norm(features) < 1e-10:
                 continue
 
-            # 5. Store ground truth
-            gt_params = np.array([random_values[n] for n in param_names], dtype=np.float32)
+            # 5. Store ground truth (full param vector for consistent shape)
+            gt_params = np.array([full_values[n] for n in all_param_names], dtype=np.float32)
 
             store.log_run(
                 run_id=run_id,
                 target_features=features,
                 best_params=gt_params,
-                param_names=param_names,
+                param_names=all_param_names,
                 best_loss=0.0,
                 total_trials=0,
                 ground_truth_params=gt_params,
@@ -160,7 +195,9 @@ def generate_with_optimization(
     from synth2surge.optimizer.loop import optimize
 
     host = PluginHost(surge_plugin_path, sample_rate=sample_rate)
-    param_names = sorted(host.parameter_names())
+    all_param_names = sorted(host.parameter_names())
+    safe_names = _safe_param_names(all_param_names)
+    default_values = host.get_raw_values()
     rng = random.Random(seed)
     np_rng = np.random.RandomState(seed)
 
@@ -176,27 +213,34 @@ def generate_with_optimization(
     for i in range(count):
         run_id = store.new_run_id()
         try:
-            # 1. Randomize parameters — this is the "target" preset
-            random_values = {name: float(np_rng.uniform(0.0, 1.0)) for name in param_names}
+            # 1. Randomize only safe parameters
+            random_values = {name: float(np_rng.uniform(0.0, 1.0)) for name in safe_names}
+            full_values = {n: random_values.get(n, default_values.get(n, 0.5))
+                           for n in all_param_names}
             host.set_raw_values(random_values)
             host.reset()
 
-            # 2. Render target audio
-            midi_config = _random_midi_config(rng)
-            target_audio = host.render_midi_mono(midi_config=midi_config)
+            # 2. Render standardized multi-probe features (6 probes, 3072-dim)
+            features, segments = render_standard_features(host, sr=sample_rate)
 
-            rms = float(np.sqrt(np.mean(target_audio**2)))
-            if rms < 1e-6:
+            # Check for silence
+            total_rms = max(
+                float(np.sqrt(np.mean(seg**2))) for seg in segments if len(seg) > 0
+            ) if segments else 0.0
+            if total_rms < 1e-6:
                 continue
 
-            features = extract_features(target_audio, sr=sample_rate)
             if np.linalg.norm(features) < 1e-10:
                 continue
 
-            gt_params = np.array([random_values[n] for n in param_names], dtype=np.float32)
+            gt_params = np.array([full_values[n] for n in all_param_names], dtype=np.float32)
 
-            # 3. Reset host to default and run optimization to recover params
-            host.set_raw_values({n: 0.5 for n in param_names})
+            # 3. Also render single-probe target audio for CMA-ES optimization
+            midi_config = _random_midi_config(rng)
+            target_audio = host.render_midi_mono(midi_config=midi_config)
+
+            # 4. Reset host to default and run optimization to recover params
+            host.set_raw_values({n: 0.5 for n in safe_names})
             host.reset()
 
             result = optimize(
@@ -208,18 +252,18 @@ def generate_with_optimization(
                 _run_id=run_id,
             )
 
-            # 4. Log the run with ground truth
+            # 5. Log the run with ground truth
             store.log_run(
                 run_id=run_id,
                 target_features=features,
                 best_params=np.array(
-                    [host.get_raw_values().get(n, 0.5) for n in param_names], dtype=np.float32
+                    [host.get_raw_values().get(n, 0.5) for n in all_param_names], dtype=np.float32
                 ),
-                param_names=param_names,
+                param_names=all_param_names,
                 best_loss=result.best_loss,
                 total_trials=result.total_trials,
                 ground_truth_params=gt_params,
-                probe_mode="single",
+                probe_mode="thorough",
                 generation_mode="optimize",
                 midi_config_json=json.dumps({
                     "note": midi_config.note,

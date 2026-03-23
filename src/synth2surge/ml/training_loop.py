@@ -6,16 +6,62 @@ Runs the full cycle unattended:
 3. Train/retrain the predictor model on all accumulated data
 4. Evaluate: A/B compare warm-started vs cold CMA-ES on held-out patches
 5. Repeat for N cycles
+
+Data generation runs in isolated subprocesses so that VST3 plugin crashes
+(segfaults) don't kill the parent process.
 """
 
 from __future__ import annotations
 
 import logging
+import multiprocessing as mp
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 logger = logging.getLogger(__name__)
+
+
+def _render_only_worker(
+    surge_plugin_path: str,
+    store_path: str,
+    count: int,
+    seed: int,
+) -> None:
+    """Subprocess target: generate render-only training data."""
+    from synth2surge.ml.data_generator import generate_render_only
+    from synth2surge.ml.experience_store import ExperienceStore
+
+    store = ExperienceStore(Path(store_path))
+    try:
+        generated = generate_render_only(
+            surge_plugin_path, store, count, seed=seed, resume=False,
+        )
+        logger.info(f"Render-only worker generated {generated} patches")
+    finally:
+        store.close()
+
+
+def _optimize_worker(
+    surge_plugin_path: str,
+    store_path: str,
+    count: int,
+    trials_per_run: int,
+    seed: int,
+) -> None:
+    """Subprocess target: generate optimization training data."""
+    from synth2surge.ml.data_generator import generate_with_optimization
+    from synth2surge.ml.experience_store import ExperienceStore
+
+    store = ExperienceStore(Path(store_path))
+    try:
+        generated = generate_with_optimization(
+            surge_plugin_path, store, count,
+            trials_per_run=trials_per_run, seed=seed,
+        )
+        logger.info(f"Optimization worker generated {generated} patches")
+    finally:
+        store.close()
 
 
 @dataclass
@@ -70,46 +116,78 @@ def run_training_loop(
     Returns:
         LoopResult with metrics for each cycle.
     """
-    from synth2surge.ml.data_generator import generate_render_only, generate_with_optimization
     from synth2surge.ml.experience_store import ExperienceStore
 
     store = ExperienceStore(store_path)
     cycle_results: list[CycleResult] = []
     total_generated = 0
 
+    ctx = mp.get_context("spawn")
+
     for cycle in range(n_cycles):
         cycle_seed = seed + cycle * 10000
+        count_before = store.count()
 
         if progress_callback:
             progress_callback(cycle + 1, n_cycles, "Generating render-only data...")
 
-        # Step 1: Generate render-only data (fast, ~2s per patch)
+        # Step 1: Generate render-only data in sub-batches of 10 patches each.
+        # Each sub-batch runs in its own subprocess so a crash only loses ~10 patches.
         n_render = int(patches_per_cycle * (1.0 - optimize_fraction))
-        gen_count = generate_render_only(
-            surge_plugin_path, store, n_render,
-            seed=cycle_seed, resume=False,
-        )
-        total_generated += gen_count
+        sub_batch_size = 10
+        for batch_start in range(0, n_render, sub_batch_size):
+            batch_count = min(sub_batch_size, n_render - batch_start)
+            batch_seed = cycle_seed + batch_start
+            proc = ctx.Process(
+                target=_render_only_worker,
+                args=(str(surge_plugin_path), str(store_path), batch_count, batch_seed),
+            )
+            proc.start()
+            proc.join(timeout=120)  # 2 min per sub-batch of 10
+            if proc.is_alive():
+                proc.kill()
+                proc.join()
+            elif proc.exitcode != 0:
+                logger.warning(
+                    f"Cycle {cycle + 1}: render sub-batch crashed (exit={proc.exitcode}), continuing"
+                )
 
-        # Step 2: Generate optimization data (slower, richer)
+        # Step 2: Generate optimization data in isolated subprocess
         n_optimize = int(patches_per_cycle * optimize_fraction)
         if n_optimize > 0:
             if progress_callback:
                 progress_callback(cycle + 1, n_cycles, "Running optimization for trial data...")
 
-            opt_count = generate_with_optimization(
-                surge_plugin_path, store, n_optimize,
-                trials_per_run=trials_per_optimize,
-                seed=cycle_seed + 5000,
+            proc = ctx.Process(
+                target=_optimize_worker,
+                args=(
+                    str(surge_plugin_path), str(store_path),
+                    n_optimize, trials_per_optimize, cycle_seed + 5000,
+                ),
             )
-            total_generated += opt_count
+            proc.start()
+            proc.join(timeout=1800)  # 30 min timeout
+            if proc.is_alive():
+                logger.warning(f"Cycle {cycle + 1}: optimize worker timed out, killing")
+                proc.kill()
+                proc.join()
+            elif proc.exitcode != 0:
+                logger.warning(
+                    f"Cycle {cycle + 1}: optimize worker crashed (exit={proc.exitcode}), continuing"
+                )
 
-        # Step 3: Train model
+        # Re-read count to see what the subprocess actually produced
+        # (need fresh query since subprocess wrote to same DB via WAL)
+        count_after = store.count()
+        gen_count = count_after - count_before
+        total_generated += gen_count
+
+        # Step 3: Train model (in parent process — PyTorch is stable)
         train_loss = None
         val_loss = None
         model_version = None
 
-        if store.count() >= 10:
+        if count_after >= 10:
             if progress_callback:
                 progress_callback(cycle + 1, n_cycles, "Training predictor model...")
 
@@ -136,18 +214,19 @@ def run_training_loop(
 
         cycle_result = CycleResult(
             cycle=cycle + 1,
-            patches_generated=gen_count + (n_optimize if n_optimize > 0 else 0),
+            patches_generated=gen_count,
             train_loss=train_loss,
             val_loss=val_loss,
             model_version=model_version,
-            total_runs_in_store=store.count(),
+            total_runs_in_store=count_after,
         )
         cycle_results.append(cycle_result)
 
         if progress_callback:
             progress_callback(
                 cycle + 1, n_cycles,
-                f"Cycle {cycle + 1} complete: {store.count()} total runs"
+                f"Cycle {cycle + 1} complete: {count_after} total runs, "
+                f"+{gen_count} this cycle"
             )
 
     store.close()
