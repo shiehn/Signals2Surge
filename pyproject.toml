@@ -44,6 +44,9 @@ dependencies = [
 [project.optional-dependencies]
 ml = [
     "torch>=2.1",
+    "laion-clap>=1.1.6",
+    "auraloss>=0.4",
+    "transformers>=4.36",
 ]
 dev = [
     "pytest>=8.0",

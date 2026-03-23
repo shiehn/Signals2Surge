@@ -1,6 +1,8 @@
-"""Feature extraction for FAISS indexing — produces fixed-length audio fingerprints.
+"""Feature extraction for audio similarity — produces fixed-length audio fingerprints.
 
-Computes 512-dim mel-spectrogram statistics (mean, std, skewness, kurtosis per mel band).
+Supports multiple backends:
+- "mel-stats": 512-dim mel-spectrogram statistics (legacy)
+- "clap": 512-dim CLAP embeddings (recommended — perceptual similarity)
 """
 
 from __future__ import annotations
@@ -12,27 +14,44 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Feature dimension is always 512 per probe regardless of backend
+FEATURES_PER_PROBE = 512
+
 
 def extract_features(
+    audio: np.ndarray,
+    sr: int = 44100,
+    backend: str = "clap",
+    **kwargs,
+) -> np.ndarray:
+    """Extract a fixed-length feature vector from audio.
+
+    Args:
+        audio: Mono audio signal (1-D float array).
+        sr: Sample rate.
+        backend: Feature extraction backend ("clap" or "mel-stats").
+
+    Returns:
+        L2-normalized feature vector of shape (512,).
+    """
+    if backend == "clap":
+        from synth2surge.loss.clap_features import extract_clap_features
+        return extract_clap_features(audio, sr=sr)
+    else:
+        return _extract_mel_stat_features(audio, sr=sr, **kwargs)
+
+
+def _extract_mel_stat_features(
     audio: np.ndarray,
     sr: int = 44100,
     n_mels: int = 128,
     n_stats: int = 4,
 ) -> np.ndarray:
-    """Extract a fixed-length feature vector from audio for similarity search.
+    """Extract mel-spectrogram statistics features (legacy 512-dim).
 
     Computes mel-spectrogram statistics (mean, std, skewness, kurtosis) per band,
     producing a (n_mels * n_stats)-dimensional vector. L2-normalized for cosine
     similarity via FAISS inner product.
-
-    Args:
-        audio: Mono audio signal (1-D float array).
-        sr: Sample rate.
-        n_mels: Number of mel bands.
-        n_stats: Number of statistics per band (4 = mean, std, skew, kurtosis).
-
-    Returns:
-        L2-normalized feature vector of shape (n_mels * n_stats,).
     """
     if len(audio) == 0 or np.sqrt(np.mean(audio**2)) < 1e-8:
         return np.zeros(n_mels * n_stats, dtype=np.float32)
@@ -62,10 +81,15 @@ def extract_features(
     return features
 
 
-def get_feature_dim(multi_probe: bool = False) -> int:
-    """Return the expected feature dimension for the current mode."""
-    if multi_probe:
-        from synth2surge.audio.standard_probes import STANDARD_FEATURE_DIM
+def get_feature_dim(multi_probe: bool = False, n_probes: int | None = None) -> int:
+    """Return the expected feature dimension.
 
-        return STANDARD_FEATURE_DIM
-    return 512
+    Args:
+        multi_probe: If True, return the multi-probe dimension.
+        n_probes: Number of probes (default 6 for thorough, 14 for full).
+    """
+    if multi_probe:
+        if n_probes is None:
+            n_probes = 6  # default thorough mode
+        return n_probes * FEATURES_PER_PROBE
+    return FEATURES_PER_PROBE

@@ -20,6 +20,7 @@ from optuna.samplers import CmaEsSampler
 from synth2surge.audio.engine import PluginHost
 from synth2surge.audio.midi import compose_multi_probe
 from synth2surge.config import MidiProbeConfig, MultiProbeConfig, OptimizationConfig
+from synth2surge.loss.enriched import enriched_loss, multi_probe_enriched_loss
 from synth2surge.loss.mr_stft import mr_stft_loss, multi_probe_loss
 from synth2surge.types import OptimizationProgress, OptimizationResult
 
@@ -104,6 +105,7 @@ def optimize(
     experience_store: object | None = None,
     _run_id: str | None = None,
     preset_name: str = "Synth2Surge",
+    loss_function: str = "enriched",
 ) -> OptimizationResult:
     """Run multi-stage CMA-ES optimization to match target audio.
 
@@ -211,12 +213,20 @@ def optimize(
             # Render and compute loss
             if use_multi_probe:
                 _, candidate_segments = surge_host.render_multi_probe(multi_probe_result)
-                loss = multi_probe_loss(
-                    target_segments, candidate_segments, segment_weights
-                )
+                if loss_function == "enriched":
+                    loss = multi_probe_enriched_loss(
+                        target_segments, candidate_segments, segment_weights
+                    )
+                else:
+                    loss = multi_probe_loss(
+                        target_segments, candidate_segments, segment_weights
+                    )
             else:
                 candidate_audio = surge_host.render_midi_mono(midi_config=midi_config)
-                loss = mr_stft_loss(target_audio, candidate_audio)
+                if loss_function == "enriched":
+                    loss = enriched_loss(target_audio, candidate_audio)
+                else:
+                    loss = mr_stft_loss(target_audio, candidate_audio)
 
             # Handle inf/nan
             if not np.isfinite(loss):

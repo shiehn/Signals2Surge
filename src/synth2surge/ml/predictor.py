@@ -26,29 +26,51 @@ class FeatureMLP(nn.Module):
 
     At inference, the user provides only an audio file — no MIDI info.
     The model learns timbral characteristics from standardized multi-probe
-    audio features (6 probes x 512 = 3072 dims by default).
+    audio features.
 
     Input: feature_dim audio feature vector.
     Output: N-dim parameter vector in [0,1] via Sigmoid.
     """
 
-    def __init__(self, n_params: int, feature_dim: int = 3072) -> None:
+    # Default hidden layer sizes for different feature dimensions
+    _DEFAULT_HIDDEN = {
+        512: [512, 256],
+        3072: [1024, 512],
+        7168: [2048, 1024, 512],
+    }
+
+    def __init__(
+        self,
+        n_params: int,
+        feature_dim: int = 7168,
+        hidden_dims: list[int] | None = None,
+        dropout: float = 0.1,
+    ) -> None:
         _check_torch()
         super().__init__()
         self.feature_dim = feature_dim
 
-        self.net = nn.Sequential(
-            nn.Linear(feature_dim, 1024),
-            nn.LayerNorm(1024),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(1024, 512),
-            nn.LayerNorm(512),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(512, n_params),
+        if hidden_dims is None:
+            hidden_dims = self._DEFAULT_HIDDEN.get(
+                feature_dim, [2048, 1024, 512]
+            )
+        self.hidden_dims = list(hidden_dims)
+
+        layers: list[nn.Module] = []
+        prev_dim = feature_dim
+        for h_dim in hidden_dims:
+            layers.extend([
+                nn.Linear(prev_dim, h_dim),
+                nn.LayerNorm(h_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+            ])
+            prev_dim = h_dim
+        layers.extend([
+            nn.Linear(prev_dim, n_params),
             nn.Sigmoid(),
-        )
+        ])
+        self.net = nn.Sequential(*layers)
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         """Forward pass.

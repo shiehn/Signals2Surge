@@ -19,6 +19,8 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+SCHEMA_VERSION = 2
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
     run_id              TEXT PRIMARY KEY,
@@ -32,7 +34,10 @@ CREATE TABLE IF NOT EXISTS runs (
     probe_mode          TEXT DEFAULT 'single',
     generation_mode     TEXT NOT NULL DEFAULT 'user',
     model_version       TEXT,
-    midi_config_json    TEXT
+    midi_config_json    TEXT,
+    schema_version      INTEGER NOT NULL DEFAULT 2,
+    feature_backend     TEXT NOT NULL DEFAULT 'clap',
+    target_audio        BLOB
 );
 
 CREATE TABLE IF NOT EXISTS trials (
@@ -98,7 +103,22 @@ class ExperienceStore:
         self._conn = sqlite3.connect(str(self._db_path))
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
+        self._migrate_schema()
         self._conn.commit()
+
+    def _migrate_schema(self) -> None:
+        """Add columns introduced in schema v2 if they don't exist yet."""
+        cursor = self._conn.execute("PRAGMA table_info(runs)")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+        new_cols = {
+            "schema_version": "INTEGER NOT NULL DEFAULT 1",
+            "feature_backend": "TEXT NOT NULL DEFAULT 'mel-stats'",
+            "target_audio": "BLOB",
+        }
+        for col, typedef in new_cols.items():
+            if col not in existing_cols:
+                self._conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {typedef}")
+                logger.info(f"Migrated experience store: added column '{col}'")
 
     def close(self) -> None:
         self._conn.close()
@@ -127,16 +147,20 @@ class ExperienceStore:
         generation_mode: str = "user",
         model_version: str | None = None,
         midi_config_json: str | None = None,
+        feature_backend: str = "clap",
+        target_audio: np.ndarray | None = None,
     ) -> None:
         """Log a completed optimization run."""
         gt_blob = _array_to_blob(ground_truth_params) if ground_truth_params is not None else None
+        audio_blob = _array_to_blob(target_audio) if target_audio is not None else None
         self._conn.execute(
             """INSERT INTO runs (
                 run_id, timestamp, target_features, best_params,
                 ground_truth_params, param_names_json, best_loss,
                 total_trials, probe_mode, generation_mode,
-                model_version, midi_config_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                model_version, midi_config_json,
+                schema_version, feature_backend, target_audio
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 run_id,
                 datetime.now(timezone.utc).isoformat(),
@@ -150,6 +174,9 @@ class ExperienceStore:
                 generation_mode,
                 model_version,
                 midi_config_json,
+                SCHEMA_VERSION,
+                feature_backend,
+                audio_blob,
             ),
         )
         self._conn.commit()
@@ -194,11 +221,18 @@ class ExperienceStore:
         self,
         max_loss: float | None = None,
         generation_mode: str | None = None,
+        feature_dim: int | None = None,
     ) -> tuple[np.ndarray, np.ndarray, list[str]]:
         """Load training data as (features_matrix, params_matrix, param_names).
 
+        Args:
+            max_loss: Only include runs with best_loss <= this value.
+            generation_mode: Filter by generation mode.
+            feature_dim: Only include runs whose feature vector has this dimension.
+                         Useful for filtering out legacy data with different feature sizes.
+
         Returns:
-            features: shape (N, 512) — audio features for each run
+            features: shape (N, feature_dim) — audio features for each run
             params: shape (N, P) — best parameter vectors
             param_names: canonical parameter ordering from first run
         """
@@ -225,8 +259,14 @@ class ExperienceStore:
         param_names: list[str] = json.loads(rows[0][2])
 
         for feat_blob, params_blob, names_json, _ in rows:
-            features_list.append(_blob_to_array(feat_blob))
+            feat = _blob_to_array(feat_blob)
+            if feature_dim is not None and feat.shape[0] != feature_dim:
+                continue
+            features_list.append(feat)
             params_list.append(_blob_to_array(params_blob))
+
+        if not features_list:
+            return np.empty((0, 0), dtype=np.float32), np.empty((0, 0), dtype=np.float32), []
 
         return (
             np.stack(features_list),
@@ -236,11 +276,15 @@ class ExperienceStore:
 
     def get_ground_truth_data(
         self,
+        feature_dim: int | None = None,
     ) -> tuple[np.ndarray, np.ndarray, list[str]]:
         """Load only runs with ground truth params (self-play data).
 
+        Args:
+            feature_dim: Only include runs whose feature vector has this dimension.
+
         Returns:
-            features: shape (N, 512)
+            features: shape (N, feature_dim)
             ground_truth_params: shape (N, P)
             param_names: canonical ordering
         """
@@ -257,8 +301,14 @@ class ExperienceStore:
         param_names: list[str] = json.loads(rows[0][2])
 
         for feat_blob, gt_blob, _ in rows:
-            features_list.append(_blob_to_array(feat_blob))
+            feat = _blob_to_array(feat_blob)
+            if feature_dim is not None and feat.shape[0] != feature_dim:
+                continue
+            features_list.append(feat)
             params_list.append(_blob_to_array(gt_blob))
+
+        if not features_list:
+            return np.empty((0, 0), dtype=np.float32), np.empty((0, 0), dtype=np.float32), []
 
         return np.stack(features_list), np.stack(params_list), param_names
 

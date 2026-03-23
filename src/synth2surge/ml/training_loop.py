@@ -27,6 +27,8 @@ def _render_only_worker(
     store_path: str,
     count: int,
     seed: int,
+    feature_backend: str = "clap",
+    probe_mode: str = "full",
 ) -> None:
     """Subprocess target: generate render-only training data."""
     from synth2surge.ml.data_generator import generate_render_only
@@ -36,6 +38,7 @@ def _render_only_worker(
     try:
         generated = generate_render_only(
             surge_plugin_path, store, count, seed=seed, resume=False,
+            feature_backend=feature_backend, probe_mode=probe_mode,
         )
         logger.info(f"Render-only worker generated {generated} patches")
     finally:
@@ -48,6 +51,8 @@ def _optimize_worker(
     count: int,
     trials_per_run: int,
     seed: int,
+    feature_backend: str = "clap",
+    probe_mode: str = "full",
 ) -> None:
     """Subprocess target: generate optimization training data."""
     from synth2surge.ml.data_generator import generate_with_optimization
@@ -58,6 +63,7 @@ def _optimize_worker(
         generated = generate_with_optimization(
             surge_plugin_path, store, count,
             trials_per_run=trials_per_run, seed=seed,
+            feature_backend=feature_backend, probe_mode=probe_mode,
         )
         logger.info(f"Optimization worker generated {generated} patches")
     finally:
@@ -98,6 +104,9 @@ def run_training_loop(
     max_train_epochs: int = 200,
     seed: int = 42,
     progress_callback: Callable[[int, int, str], None] | None = None,
+    feature_backend: str = "clap",
+    probe_mode: str = "full",
+    hidden_dims: list[int] | None = None,
 ) -> LoopResult:
     """Run the autonomous self-improvement loop.
 
@@ -140,7 +149,8 @@ def run_training_loop(
             batch_seed = cycle_seed + batch_start
             proc = ctx.Process(
                 target=_render_only_worker,
-                args=(str(surge_plugin_path), str(store_path), batch_count, batch_seed),
+                args=(str(surge_plugin_path), str(store_path), batch_count, batch_seed,
+                      feature_backend, probe_mode),
             )
             proc.start()
             proc.join(timeout=120)  # 2 min per sub-batch of 10
@@ -163,6 +173,7 @@ def run_training_loop(
                 args=(
                     str(surge_plugin_path), str(store_path),
                     n_optimize, trials_per_optimize, cycle_seed + 5000,
+                    feature_backend, probe_mode,
                 ),
             )
             proc.start()
@@ -194,10 +205,17 @@ def run_training_loop(
             try:
                 from synth2surge.ml.trainer import train_predictor
 
+                from synth2surge.audio.standard_probes import get_feature_dim_for_mode
+
+                expected_dim = get_feature_dim_for_mode(probe_mode)
                 result = train_predictor(
                     store_path=store_path,
                     models_dir=models_dir,
                     max_epochs=max_train_epochs,
+                    feature_backend=feature_backend,
+                    probe_mode=probe_mode,
+                    hidden_dims=hidden_dims,
+                    feature_dim=expected_dim,
                 )
                 if result is not None:
                     train_loss = result.final_train_loss

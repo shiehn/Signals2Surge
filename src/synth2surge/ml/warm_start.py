@@ -99,14 +99,31 @@ class WarmStarter:
         n_params = config["n_params"]
 
         feature_dim = config.get("feature_dim", 512)
-        self._model = FeatureMLP(n_params, feature_dim=feature_dim)
+        hidden_dims = config.get("hidden_dims", None)
+        self._feature_backend = config.get("feature_extractor", "mel-stats")
+        self._probe_mode = config.get("probe_mode", "thorough")
+
+        self._model = FeatureMLP(n_params, feature_dim=feature_dim, hidden_dims=hidden_dims)
         state = torch.load(model_path, map_location="cpu", weights_only=True)
         self._model.load_state_dict(state)
         self._model.eval()
         self._loaded = True
 
-        logger.info(f"Loaded predictor model from {checkpoint_dir.name} ({n_params} params)")
+        logger.info(
+            f"Loaded predictor model from {checkpoint_dir.name} ({n_params} params, "
+            f"features={self._feature_backend}, probes={self._probe_mode})"
+        )
         return True
+
+    @property
+    def feature_backend(self) -> str:
+        """Return the feature backend this model was trained with."""
+        return getattr(self, "_feature_backend", "mel-stats")
+
+    @property
+    def probe_mode(self) -> str:
+        """Return the probe mode this model was trained with."""
+        return getattr(self, "_probe_mode", "thorough")
 
     def predict(
         self,

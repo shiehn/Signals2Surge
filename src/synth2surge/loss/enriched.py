@@ -181,3 +181,41 @@ def enriched_loss(
         return 1e6
 
     return float(total)
+
+
+def multi_probe_enriched_loss(
+    target_segments: list[np.ndarray],
+    candidate_segments: list[np.ndarray],
+    weights: list[float],
+    sr: int = 44100,
+    **kwargs,
+) -> float:
+    """Weighted multi-probe enriched loss across multiple audio segments.
+
+    Computes enriched_loss() for each segment pair and returns the weighted
+    average. Returns inf only if ALL segments return inf.
+
+    Args:
+        target_segments: List of target audio segments (1-D arrays).
+        candidate_segments: List of candidate audio segments (1-D arrays).
+        weights: Per-segment weights.
+        sr: Sample rate.
+
+    Returns:
+        Weighted average enriched loss (lower = more similar).
+    """
+    total_weight = 0.0
+    weighted_loss = 0.0
+    all_inf = True
+
+    for target_seg, cand_seg, w in zip(target_segments, candidate_segments, weights):
+        loss = enriched_loss(target_seg, cand_seg, sr=sr, **kwargs)
+        if np.isfinite(loss):
+            weighted_loss += w * loss
+            total_weight += w
+            all_inf = False
+
+    if all_inf:
+        return float("inf")
+
+    return weighted_loss / total_weight if total_weight > 0 else float("inf")

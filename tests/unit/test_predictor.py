@@ -33,7 +33,7 @@ class TestFeatureMLP:
     def test_output_range(self):
         from synth2surge.ml.predictor import FeatureMLP
 
-        model = FeatureMLP(n_params=100)
+        model = FeatureMLP(n_params=100, feature_dim=3072)
         x = torch.randn(8, 3072)
         out = model(x)
         assert out.min() >= 0.0
@@ -42,7 +42,7 @@ class TestFeatureMLP:
     def test_single_sample(self):
         from synth2surge.ml.predictor import FeatureMLP
 
-        model = FeatureMLP(n_params=50)
+        model = FeatureMLP(n_params=50, feature_dim=3072)
         x = torch.randn(1, 3072)
         out = model(x)
         assert out.shape == (1, 50)
@@ -50,7 +50,7 @@ class TestFeatureMLP:
     def test_gradient_flows(self):
         from synth2surge.ml.predictor import FeatureMLP
 
-        model = FeatureMLP(n_params=50)
+        model = FeatureMLP(n_params=50, feature_dim=3072)
         x = torch.randn(4, 3072)
         target = torch.rand(4, 50)
         loss = ((model(x) - target) ** 2).mean()
@@ -58,3 +58,21 @@ class TestFeatureMLP:
 
         has_grad = any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.parameters())
         assert has_grad
+
+    def test_default_7168_dim(self):
+        from synth2surge.ml.predictor import FeatureMLP
+
+        model = FeatureMLP(n_params=100)
+        x = torch.randn(4, 7168)
+        out = model(x)
+        assert out.shape == (4, 100)
+        assert model.hidden_dims == [2048, 1024, 512]
+
+    def test_custom_hidden_dims(self):
+        from synth2surge.ml.predictor import FeatureMLP
+
+        model = FeatureMLP(n_params=50, feature_dim=1024, hidden_dims=[512, 256])
+        x = torch.randn(2, 1024)
+        out = model(x)
+        assert out.shape == (2, 50)
+        assert model.hidden_dims == [512, 256]

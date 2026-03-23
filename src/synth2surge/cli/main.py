@@ -542,6 +542,8 @@ def train_loop(
     patches_per_cycle: int = typer.Option(100, help="Patches to generate per cycle"),
     trials: int = typer.Option(200, help="Trials per optimization run"),
     seed: int = typer.Option(42, help="Random seed"),
+    feature_backend: str = typer.Option("clap", help="Feature backend: clap or mel-stats"),
+    probe_mode: str = typer.Option("full", help="Probe mode: full (14) or thorough (6)"),
 ) -> None:
     """Run the autonomous self-improvement training loop.
 
@@ -552,6 +554,8 @@ def train_loop(
     console.print("[bold]Starting autonomous training loop[/bold]")
     console.print(f"  Cycles: {cycles}")
     console.print(f"  Patches/cycle: {patches_per_cycle}")
+    console.print(f"  Features: {feature_backend}")
+    console.print(f"  Probes: {probe_mode}")
     console.print(f"  Plugin: {surge_plugin}")
     console.print()
 
@@ -576,6 +580,8 @@ def train_loop(
             trials_per_optimize=trials,
             seed=seed,
             progress_callback=on_progress,
+            feature_backend=feature_backend,
+            probe_mode=probe_mode,
         )
 
     console.print("\n[green bold]Training loop complete![/green bold]")

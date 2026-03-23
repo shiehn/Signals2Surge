@@ -71,6 +71,8 @@ def generate_render_only(
     seed: int = 42,
     progress_callback: Callable[[int, int], None] | None = None,
     resume: bool = True,
+    feature_backend: str = "clap",
+    probe_mode: str = "full",
 ) -> int:
     """Generate training data by randomizing params and rendering audio.
 
@@ -121,8 +123,11 @@ def generate_render_only(
             host.set_raw_values(random_values)
             host.reset()
 
-            # 2. Render standardized multi-probe set (6 probes)
-            features, segments = render_standard_features(host, sr=sample_rate)
+            # 2. Render standardized multi-probe set
+            features, segments = render_standard_features(
+                host, sr=sample_rate,
+                feature_backend=feature_backend, probe_mode=probe_mode,
+            )
 
             # 3. Skip silent patches (check if any segment has audio)
             total_rms = max(
@@ -139,6 +144,11 @@ def generate_render_only(
             # 5. Store ground truth (full param vector for consistent shape)
             gt_params = np.array([full_values[n] for n in all_param_names], dtype=np.float32)
 
+            # 6. Concatenate audio segments for round-trip validation (float16 to save space)
+            audio_concat = np.concatenate(
+                [seg.astype(np.float16) for seg in segments if len(seg) > 0]
+            )
+
             store.log_run(
                 run_id=run_id,
                 target_features=features,
@@ -147,9 +157,11 @@ def generate_render_only(
                 best_loss=0.0,
                 total_trials=0,
                 ground_truth_params=gt_params,
-                probe_mode="thorough",
+                probe_mode=probe_mode,
                 generation_mode="random",
-                midi_config_json=json.dumps({"probe_mode": "thorough"}),
+                feature_backend=feature_backend,
+                target_audio=audio_concat,
+                midi_config_json=json.dumps({"probe_mode": probe_mode}),
             )
             generated += 1
 
@@ -172,6 +184,8 @@ def generate_with_optimization(
     sample_rate: int = 44100,
     seed: int = 42,
     progress_callback: Callable[[int, int], None] | None = None,
+    feature_backend: str = "clap",
+    probe_mode: str = "full",
 ) -> int:
     """Generate training data with CMA-ES optimization for richer trial-level data.
 
@@ -220,8 +234,11 @@ def generate_with_optimization(
             host.set_raw_values(random_values)
             host.reset()
 
-            # 2. Render standardized multi-probe features (6 probes, 3072-dim)
-            features, segments = render_standard_features(host, sr=sample_rate)
+            # 2. Render standardized multi-probe features
+            features, segments = render_standard_features(
+                host, sr=sample_rate,
+                feature_backend=feature_backend, probe_mode=probe_mode,
+            )
 
             # Check for silence
             total_rms = max(
@@ -263,8 +280,9 @@ def generate_with_optimization(
                 best_loss=result.best_loss,
                 total_trials=result.total_trials,
                 ground_truth_params=gt_params,
-                probe_mode="thorough",
+                probe_mode=probe_mode,
                 generation_mode="optimize",
+                feature_backend=feature_backend,
                 midi_config_json=json.dumps({
                     "note": midi_config.note,
                     "velocity": midi_config.velocity,

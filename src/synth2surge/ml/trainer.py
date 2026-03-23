@@ -75,6 +75,10 @@ def train_predictor(
     lr: float = 1e-3,
     weight_decay: float = 1e-4,
     val_fraction: float = 0.15,
+    feature_backend: str = "clap",
+    probe_mode: str = "full",
+    hidden_dims: list[int] | None = None,
+    feature_dim: int | None = None,
 ) -> TrainResult | None:
     """Train a FeatureMLP predictor on accumulated experience data.
 
@@ -100,9 +104,10 @@ def train_predictor(
     store = ExperienceStore(store_path)
 
     # Prefer ground truth data (self-play), fall back to best-params
-    features, params, param_names = store.get_ground_truth_data()
+    # Filter by feature_dim to avoid mixing legacy and new data
+    features, params, param_names = store.get_ground_truth_data(feature_dim=feature_dim)
     if features.shape[0] == 0:
-        features, params, param_names = store.get_training_data()
+        features, params, param_names = store.get_training_data(feature_dim=feature_dim)
 
     if features.shape[0] < 10:
         logger.warning(f"Only {features.shape[0]} training samples, need at least 10")
@@ -140,7 +145,7 @@ def train_predictor(
 
     # Create model
     device = _get_device()
-    model = FeatureMLP(n_params, feature_dim=feature_dim).to(device)
+    model = FeatureMLP(n_params, feature_dim=feature_dim, hidden_dims=hidden_dims).to(device)
     tier_weights_tensor = tier_weights_tensor.to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -205,12 +210,16 @@ def train_predictor(
     torch.save(best_state, checkpoint_path)
 
     config_path = checkpoint_dir / "config.json"
+    effective_hidden = hidden_dims if hidden_dims is not None else model.hidden_dims
     config_path.write_text(json.dumps({
         "architecture": "FeatureMLP",
         "n_params": n_params,
         "feature_dim": feature_dim,
+        "hidden_dims": effective_hidden,
         "n_training_samples": n_total,
         "best_val_loss": best_val_loss,
+        "feature_extractor": feature_backend,
+        "probe_mode": probe_mode,
         "param_names": param_names,
     }))
 
