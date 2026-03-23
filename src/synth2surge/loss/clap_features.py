@@ -54,6 +54,7 @@ class CLAPExtractor:
         self._processor = ClapProcessor.from_pretrained(model_id)
         self._hf_model = ClapModel.from_pretrained(model_id)
         self._hf_model.eval()
+        self._model = self._hf_model  # Mark as loaded so _ensure_loaded won't re-run
         self._use_hf = True
         logger.info(f"CLAP model loaded via transformers ({model_id})")
 

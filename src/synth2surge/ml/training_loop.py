@@ -7,42 +7,102 @@ Runs the full cycle unattended:
 4. Evaluate: A/B compare warm-started vs cold CMA-ES on held-out patches
 5. Repeat for N cycles
 
-Data generation runs in isolated subprocesses so that VST3 plugin crashes
-(segfaults) don't kill the parent process.
+Architecture: Subprocesses handle crash-prone Surge XT rendering.
+The parent process handles CLAP feature extraction (loaded once, reused).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import multiprocessing as mp
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
 
 
-def _render_only_worker(
+def _render_audio_worker(
     surge_plugin_path: str,
-    store_path: str,
+    output_dir: str,
     count: int,
     seed: int,
-    feature_backend: str = "clap",
     probe_mode: str = "full",
 ) -> None:
-    """Subprocess target: generate render-only training data."""
-    from synth2surge.ml.data_generator import generate_render_only
-    from synth2surge.ml.experience_store import ExperienceStore
+    """Subprocess target: render audio only (no feature extraction).
 
-    store = ExperienceStore(Path(store_path))
-    try:
-        generated = generate_render_only(
-            surge_plugin_path, store, count, seed=seed, resume=False,
-            feature_backend=feature_backend, probe_mode=probe_mode,
-        )
-        logger.info(f"Render-only worker generated {generated} patches")
-    finally:
-        store.close()
+    Saves raw audio segments + params to .npz files in output_dir.
+    CLAP feature extraction happens in the parent process.
+    """
+    from synth2surge.audio.engine import PluginHost
+    from synth2surge.audio.midi import compose_multi_probe
+    from synth2surge.audio.standard_probes import get_standard_probe_config
+
+    host = PluginHost(surge_plugin_path, sample_rate=44100)
+    all_param_names = sorted(host.parameter_names())
+
+    # Filter to safe params (scene A only, no crash-prone params)
+    safe_names = []
+    crash_patterns = ("trigger_mode", "play_mode")
+    for name in all_param_names:
+        if not name.startswith("a_"):
+            continue
+        if any(p in name for p in crash_patterns):
+            continue
+        safe_names.append(name)
+
+    default_values = host.get_raw_values()
+    np_rng = np.random.RandomState(seed)
+
+    logger.info(
+        f"Randomizing {len(safe_names)}/{len(all_param_names)} safe params "
+        f"(skipping {len(all_param_names) - len(safe_names)} scene-B/control params)"
+    )
+
+    config = get_standard_probe_config(mode=probe_mode)
+    multi_probe = compose_multi_probe(config, sample_rate=44100)
+
+    generated = 0
+    for i in range(count):
+        try:
+            # Randomize safe parameters
+            random_values = {name: float(np_rng.uniform(0.0, 1.0)) for name in safe_names}
+            full_values = {n: random_values.get(n, default_values.get(n, 0.5))
+                           for n in all_param_names}
+            host.set_raw_values(random_values)
+            host.reset()
+
+            # Render multi-probe audio
+            _, segments = host.render_multi_probe(multi_probe)
+
+            # Skip silent patches
+            total_rms = max(
+                float(np.sqrt(np.mean(seg**2))) for seg in segments if len(seg) > 0
+            ) if segments else 0.0
+            if total_rms < 1e-6:
+                continue
+
+            # Save audio + params to npz file (parent will extract features)
+            gt_params = np.array([full_values[n] for n in all_param_names], dtype=np.float32)
+            out_path = Path(output_dir) / f"patch_{seed}_{i}.npz"
+            np.savez_compressed(
+                out_path,
+                params=gt_params,
+                param_names=np.array(all_param_names),
+                **{f"seg_{j}": seg.astype(np.float32) for j, seg in enumerate(segments)},
+                n_segments=np.array([len(segments)]),
+            )
+            generated += 1
+
+        except Exception:
+            logger.exception(f"Error rendering patch {i}")
+            continue
+
+    logger.info(f"Render worker generated {generated} audio patches")
 
 
 def _optimize_worker(
@@ -54,7 +114,11 @@ def _optimize_worker(
     feature_backend: str = "clap",
     probe_mode: str = "full",
 ) -> None:
-    """Subprocess target: generate optimization training data."""
+    """Subprocess target: generate optimization training data.
+
+    Optimization workers still do their own feature extraction since they
+    need features for the CMA-ES loss function internally.
+    """
     from synth2surge.ml.data_generator import generate_with_optimization
     from synth2surge.ml.experience_store import ExperienceStore
 
@@ -92,6 +156,74 @@ class LoopResult:
     cycle_results: list[CycleResult]
 
 
+def _extract_features_from_npz(
+    npz_dir: Path,
+    store,
+    feature_backend: str,
+    probe_mode: str,
+) -> int:
+    """Extract CLAP features from rendered audio in parent process and store results.
+
+    This runs in the parent process where CLAP is loaded once.
+
+    Returns:
+        Number of patches successfully processed.
+    """
+    from synth2surge.audio.standard_probes import (
+        extract_multi_probe_features,
+        get_probe_count,
+    )
+
+    n_probes = get_probe_count(probe_mode)
+    npz_files = sorted(npz_dir.glob("patch_*.npz"))
+    stored = 0
+
+    for npz_path in npz_files:
+        try:
+            data = np.load(npz_path, allow_pickle=True)
+            params = data["params"]
+            param_names = list(data["param_names"])
+            n_segments = int(data["n_segments"][0])
+
+            segments = [data[f"seg_{j}"] for j in range(n_segments)]
+
+            # Extract features in parent process (CLAP loaded once)
+            features = extract_multi_probe_features(
+                segments, sr=44100, feature_backend=feature_backend, n_probes=n_probes,
+            )
+
+            if np.linalg.norm(features) < 1e-10:
+                continue
+
+            # Concatenate audio for round-trip storage
+            audio_concat = np.concatenate(
+                [seg.astype(np.float16) for seg in segments if len(seg) > 0]
+            )
+
+            run_id = store.new_run_id()
+            store.log_run(
+                run_id=run_id,
+                target_features=features,
+                best_params=params,
+                param_names=param_names,
+                best_loss=0.0,
+                total_trials=0,
+                ground_truth_params=params,
+                probe_mode=probe_mode,
+                generation_mode="random",
+                feature_backend=feature_backend,
+                target_audio=audio_concat,
+                midi_config_json=json.dumps({"probe_mode": probe_mode}),
+            )
+            stored += 1
+
+        except Exception:
+            logger.exception(f"Error extracting features from {npz_path.name}")
+            continue
+
+    return stored
+
+
 def run_training_loop(
     surge_plugin_path: str | Path,
     store_path: Path,
@@ -109,6 +241,10 @@ def run_training_loop(
     hidden_dims: list[int] | None = None,
 ) -> LoopResult:
     """Run the autonomous self-improvement loop.
+
+    Architecture:
+    - Subprocesses: Surge XT rendering only (crash-isolated)
+    - Parent process: CLAP feature extraction (loaded once), training
 
     Args:
         surge_plugin_path: Path to Surge XT VST3.
@@ -138,29 +274,40 @@ def run_training_loop(
         count_before = store.count()
 
         if progress_callback:
-            progress_callback(cycle + 1, n_cycles, "Generating render-only data...")
+            progress_callback(cycle + 1, n_cycles, "Rendering audio (subprocess)...")
 
-        # Step 1: Generate render-only data in sub-batches of 10 patches each.
-        # Each sub-batch runs in its own subprocess so a crash only loses ~10 patches.
+        # Step 1: Render audio in sub-batches (subprocess, crash-isolated).
+        # Audio is saved to temp .npz files; features extracted in parent.
         n_render = int(patches_per_cycle * (1.0 - optimize_fraction))
         sub_batch_size = 10
-        for batch_start in range(0, n_render, sub_batch_size):
-            batch_count = min(sub_batch_size, n_render - batch_start)
-            batch_seed = cycle_seed + batch_start
-            proc = ctx.Process(
-                target=_render_only_worker,
-                args=(str(surge_plugin_path), str(store_path), batch_count, batch_seed,
-                      feature_backend, probe_mode),
-            )
-            proc.start()
-            proc.join(timeout=120)  # 2 min per sub-batch of 10
-            if proc.is_alive():
-                proc.kill()
-                proc.join()
-            elif proc.exitcode != 0:
-                logger.warning(
-                    f"Cycle {cycle + 1}: render sub-batch crashed (exit={proc.exitcode}), continuing"
+
+        with tempfile.TemporaryDirectory(prefix="s2s_render_") as tmp_dir:
+            for batch_start in range(0, n_render, sub_batch_size):
+                batch_count = min(sub_batch_size, n_render - batch_start)
+                batch_seed = cycle_seed + batch_start
+                proc = ctx.Process(
+                    target=_render_audio_worker,
+                    args=(str(surge_plugin_path), tmp_dir, batch_count, batch_seed,
+                          probe_mode),
                 )
+                proc.start()
+                proc.join(timeout=120)  # 2 min per sub-batch of 10
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join()
+                elif proc.exitcode != 0:
+                    logger.warning(
+                        f"Cycle {cycle + 1}: render sub-batch crashed (exit={proc.exitcode}), continuing"
+                    )
+
+            # Extract features in parent process (CLAP loaded once here)
+            if progress_callback:
+                progress_callback(cycle + 1, n_cycles, "Extracting CLAP features...")
+
+            stored = _extract_features_from_npz(
+                Path(tmp_dir), store, feature_backend, probe_mode,
+            )
+            logger.info(f"Cycle {cycle + 1}: extracted features for {stored} patches")
 
         # Step 2: Generate optimization data in isolated subprocess
         n_optimize = int(patches_per_cycle * optimize_fraction)
@@ -187,8 +334,7 @@ def run_training_loop(
                     f"Cycle {cycle + 1}: optimize worker crashed (exit={proc.exitcode}), continuing"
                 )
 
-        # Re-read count to see what the subprocess actually produced
-        # (need fresh query since subprocess wrote to same DB via WAL)
+        # Re-read count to see what was produced
         count_after = store.count()
         gen_count = count_after - count_before
         total_generated += gen_count
