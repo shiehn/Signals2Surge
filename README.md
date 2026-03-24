@@ -101,7 +101,7 @@ Here's a complete walkthrough you can run right now. Requires Surge XT installed
 
 ### Download the pretrained model
 
-A pretrained model (trained on 966 Surge XT patches) is available as a [GitHub release](https://github.com/shiehn/Signals2Surge/releases). This is the fastest way to get started:
+A pretrained model (trained on 1,410 Surge XT patches with CLAP embeddings) is available as a [GitHub release](https://github.com/shiehn/Signals2Surge/releases). This is the fastest way to get started:
 
 ```bash
 # Download the pretrained model (~3 MB)
@@ -411,12 +411,12 @@ synth2surge train package \
 
 ```bash
 # Tag a release
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.6.0
+git push origin v0.6.0
 
 # Create the release and attach the model
-gh release create v0.2.0 pretrained-model.zip \
-  --title "v0.2.0 - Pretrained model" \
+gh release create v0.6.0 pretrained-model.zip \
+  --title "v0.6.0 — Pretrained model" \
   --notes "Includes pretrained parameter predictor trained on N patches"
 ```
 
@@ -478,8 +478,8 @@ synth2surge train package \
   --checkpoint-dir workspace/models/predictor_vN
 
 # Upload to GitHub releases
-gh release create v0.2.0 pretrained-model.zip \
-  --title "v0.2.0 — Pretrained model" \
+gh release create v0.6.0 pretrained-model.zip \
+  --title "v0.6.0 — Pretrained model" \
   --notes "Trained on N patches, val_loss=X.XXX"
 ```
 
@@ -771,6 +771,54 @@ Tests that require Surge XT are marked `@pytest.mark.requires_surge` and auto-sk
 | **E2E Surge XT** (17) | Real plugin rendering, data generation, optimization, factory round-trips, multi-probe pipeline, and closed-loop: generate → train → warm-start predict with actual Surge XT audio |
 | **Integration** | Plugin loading, audio rendering, state round-trip, optimizer convergence |
 | **Acceptance** | Loss ranking correctness, feature similarity, self-translation quality |
+
+## Future Improvements
+
+The v0.6.0 architecture (CLAP embeddings + 14-probe + enriched loss + scaled MLP) establishes a strong baseline. The model plateaus at ~0.0435 val_loss with ~1,400 samples. The following improvements are ranked by expected impact.
+
+### Audio-domain round-trip loss (Phase 5)
+
+The current training loss (parameter MSE) is fundamentally flawed for Surge XT. An [ISMIR 2025 paper on Surge XT parameter symmetries](https://arxiv.org/abs/2506.07199) proved that multiple parameter configurations produce identical sounds (e.g., swapping oscillators 1 and 2). Parameter MSE penalizes these equivalent solutions.
+
+The fix: instead of comparing predicted vs ground-truth *parameters*, render audio from the predicted parameters and compare the *audio*. The experience store already saves rendered audio (target_audio column) for this purpose. The approach:
+
+1. After initial training, predict params for each training sample
+2. Render audio from predicted params in Surge XT (subprocess)
+3. Compute enriched audio loss between predicted-audio and target-audio
+4. Upweight samples where audio loss >> param MSE (model learned wrong-sounding params)
+5. Downweight samples where param MSE is high but audio loss is low (harmless symmetry)
+
+This addresses the root cause of the loss plateau without requiring a differentiable synthesizer.
+
+### Differentiable synthesizer proxy
+
+Train a neural network to approximate Surge XT's rendering behavior (params → spectrogram). This would enable true end-to-end gradient-based training through the audio domain using [auraloss](https://github.com/csteinmetz1/auraloss) multi-resolution STFT loss, replacing CMA-ES for parameter refinement entirely. Related work: [InverSynth II (ISMIR 2023)](https://archives.ismir.net/ismir2023/paper/000076.pdf), [DiffMoog (2024)](https://arxiv.org/abs/2401.12570).
+
+### Audio Spectrogram Transformer
+
+Replace the FeatureMLP with an Audio Spectrogram Transformer (AST) that operates directly on mel spectrograms rather than pre-extracted CLAP embeddings. A [DAFx 2024 paper](https://arxiv.org/html/2407.16643v1) showed AST massively outperforms MLP baselines for synth parameter prediction when trained on 1M+ random presets. This would require significantly more training data but could break through the current accuracy ceiling.
+
+### Hybrid feature embeddings
+
+The ["Diverse Audio Embeddings" paper (2023)](https://arxiv.org/abs/2309.08751) showed that combining handcrafted features with pretrained embeddings outperforms either alone. The current pipeline uses CLAP only; concatenating the original mel-stat features alongside CLAP embeddings (1024-dim per probe instead of 512) could capture complementary information.
+
+### Factory preset training data
+
+The current training data is entirely random parameter combinations. Adding Surge XT's ~500 factory presets as training data would provide musically meaningful ground truth — real patches designed by sound designers rather than random noise. The `generate_from_factory` data generator already supports this.
+
+### Stabilizing Surge XT rendering
+
+Currently ~25-30% of rendering attempts crash (SIGSEGV) due to unstable parameter combinations in Surge XT. Expanding the crash-pattern filter (`_CRASH_PATTERNS` in data_generator.py) through systematic binary search would increase data yield per cycle and training throughput.
+
+### Research references
+
+- **"Instrumental" (2025)** — CMA-ES + composite loss is SOTA for black-box synth matching
+- **ISMIR 2025 "Symmetric Parameter Spaces"** — Surge XT has parameter permutation symmetries; parameter MSE is fundamentally limited
+- **"Diverse Audio Embeddings" (2023)** — Hybrid handcrafted + pretrained features outperform either alone
+- **LAION-CLAP** — Best alignment with human-perceived timbre similarity
+- **Synplant 2 (Sonic Charge)** — Validates the ML warm-start + evolutionary refinement architecture used by Synth2Surge
+
+---
 
 ## License
 
