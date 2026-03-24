@@ -44,7 +44,13 @@ class CLAPExtractor:
             logger.warning(
                 "laion-clap not installed. Falling back to transformers ClapModel."
             )
-            self._load_transformers_clap()
+            try:
+                self._load_transformers_clap()
+            except ImportError:
+                raise ImportError(
+                    "Neither laion-clap nor transformers is installed. "
+                    "Install ML extras: pip install synth2surge[ml]"
+                )
 
     def _load_transformers_clap(self) -> None:
         """Fallback: load CLAP via HuggingFace transformers."""

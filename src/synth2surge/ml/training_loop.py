@@ -297,7 +297,8 @@ def run_training_loop(
                     proc.join()
                 elif proc.exitcode != 0:
                     logger.warning(
-                        f"Cycle {cycle + 1}: render sub-batch crashed (exit={proc.exitcode}), continuing"
+                        f"Cycle {cycle + 1}: render sub-batch crashed "
+                        f"(exit={proc.exitcode}), continuing"
                     )
 
             # Extract features in parent process (CLAP loaded once here)
@@ -349,9 +350,8 @@ def run_training_loop(
                 progress_callback(cycle + 1, n_cycles, "Training predictor model...")
 
             try:
-                from synth2surge.ml.trainer import train_predictor
-
                 from synth2surge.audio.standard_probes import get_feature_dim_for_mode
+                from synth2surge.ml.trainer import train_predictor
 
                 expected_dim = get_feature_dim_for_mode(probe_mode)
                 result = train_predictor(

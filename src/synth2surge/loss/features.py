@@ -35,8 +35,15 @@ def extract_features(
         L2-normalized feature vector of shape (512,).
     """
     if backend == "clap":
-        from synth2surge.loss.clap_features import extract_clap_features
-        return extract_clap_features(audio, sr=sr)
+        try:
+            from synth2surge.loss.clap_features import extract_clap_features
+            return extract_clap_features(audio, sr=sr)
+        except ImportError:
+            logger.warning(
+                "CLAP dependencies not available (install synth2surge[ml]), "
+                "falling back to mel-stats"
+            )
+            return _extract_mel_stat_features(audio, sr=sr, **kwargs)
     else:
         return _extract_mel_stat_features(audio, sr=sr, **kwargs)
 

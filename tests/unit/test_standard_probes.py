@@ -4,8 +4,6 @@ import numpy as np
 import pytest
 
 from synth2surge.audio.standard_probes import (
-    FEATURES_PER_PROBE,
-    N_STANDARD_PROBES,
     STANDARD_FEATURE_DIM,
     extract_multi_probe_features,
     get_feature_dim_for_mode,

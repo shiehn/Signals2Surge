@@ -6,10 +6,22 @@ import pytest
 from synth2surge.loss.features import extract_features
 from tests.factories import make_noise, make_silence, make_sine_wave
 
+_has_clap = True
+try:
+    import laion_clap  # noqa: F401
+except ImportError:
+    try:
+        import transformers  # noqa: F401
+    except ImportError:
+        _has_clap = False
+
+requires_clap = pytest.mark.skipif(not _has_clap, reason="CLAP dependencies not installed")
+
 
 class TestExtractFeatures:
     """Tests for audio feature extraction (both backends)."""
 
+    @requires_clap
     def test_output_shape_clap(self):
         audio = make_sine_wave(440.0, duration=1.0)
         features = extract_features(audio, backend="clap")
@@ -39,6 +51,7 @@ class TestExtractFeatures:
         f2 = extract_features(audio, backend="mel-stats")
         np.testing.assert_array_equal(f1, f2)
 
+    @requires_clap
     def test_silence_returns_zeros_clap(self):
         silence = make_silence(duration=1.0)
         features = extract_features(silence, backend="clap")
